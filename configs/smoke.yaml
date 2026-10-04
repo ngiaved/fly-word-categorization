@@ -1,0 +1,76 @@
+# Smoke configuration: small enough to run in a couple of minutes on a laptop.
+#
+# Same code path as configs/default.yaml, with the subcircuit and trial budget
+# shrunk. Used by `flyread selftest` and by the fast tests. NOT a source of
+# reported numbers.
+#
+#   flyread --config configs/smoke.yaml selftest
+
+simulation:
+  dt: 0.5
+
+subcircuit:
+  candidate: smoke
+  stages:
+    - name: photoreceptor
+      rules:
+        - {column: cell_class, equals: visual}
+        - {column: cell_type, equals: R1-6}
+      cap: 36
+    - name: lamina
+      rules:
+        - {column: cell_class, equals: "LA>ME"}
+      cap: 24
+    - name: medulla
+      rules:
+        - {column: cell_class, equals: "ME"}
+      cap: 24
+    - name: lobula
+      rules:
+        - {column: cell_class, in: ["LO", "LO>LOP", "LOP"]}
+      cap: 12
+    - name: reinforcement
+      rules:
+        - {column: cell_class, equals: MBIN}
+      cap: 4
+    - name: mushroom_body
+      rules:
+        - {column: cell_class, equals: Kenyon_Cell}
+      cap: 24
+    - name: output
+      rules:
+        - {column: cell_class, equals: MBON}
+      cap: 4
+
+network:
+  reserve_size: 6
+  reward_tau_ms: 60.0
+
+calibration:
+  scale_grid: [0.05, 0.5, 5.0]
+  simulated_ms: 100.0
+  settle_ms: 20.0
+
+encoding:
+  grid_rows: 6
+  grid_cols: 6
+  stimulus_ms: 60.0
+  rest_ms: 40.0
+
+evaluation:
+  train_per_category: 15
+  test_per_category: 5
+  n_seeds: 3
+  n_train_trials: 40
+  curve_window_trials: 10
+  eval_repeats: 1
+  ci_resamples: 200
+
+structural:
+  check_every_n_trials: 10
+  prune_consecutive_checks: 1
+  silence_window_trials: 10
+
+benchmark:
+  simulated_ms: 100.0
+  settle_ms: 20.0

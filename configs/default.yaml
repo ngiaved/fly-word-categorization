@@ -1,0 +1,322 @@
+# flyread default configuration.
+#
+# Every value here can be overridden with `--config file.yaml` or
+# `--set section.key=value`. The effective configuration is copied into every
+# run manifest. Units are given in each key's comment; Brian2 accepts plain
+# numbers for times (interpreted as ms) and so does this file.
+
+run:
+  # Root for all run outputs. Each run writes <output_dir>/<run_id>/
+  output_dir: runs
+  # Leave empty to derive a timestamped id; set for reproducible directories.
+  run_id: ""
+  # Tolerance for the same-seed determinism check, in accuracy fraction.
+  determinism_tolerance: 1.0e-9
+  log_level: INFO
+
+simulation:
+  # Integration step. Brian2 reads plain numbers as ms.
+  dt: 0.1
+  # Brian2 code generation target: auto prefers Cython and falls back to numpy.
+  codegen_target: auto
+
+data:
+  # FlyWire release identifier recorded in every manifest.
+  release: "783"
+  # Directory holding the downloaded FlyWire files. Never committed.
+  flywire_dir: data/flywire
+  # Dataset of 4-letter words.
+  words_csv: data/words.csv
+
+# Checksums are verified before the loader builds anything. `null` disables the
+# check for that file and is recorded in the manifest as an explicit warning.
+connectome:
+  annotations_file: data/flywire/Supplemental_file1_neuron_annotations.tsv
+  connections_file: data/flywire/proofread_connections_783.feather
+  annotations_md5: fd4fcb205256ca2f80a2eca3a0cc5d87
+  connections_md5: f48f972d262323a102aed49af1396b8a
+  # Set true only for local iteration; disables the required-column check.
+  allow_missing_columns: false
+  # Required columns, verified against the real files. Annotation columns come
+  # from Supplemental_file1_neuron_annotations.tsv; connection columns from
+  # proofread_connections_783.feather (one row per pre/post neuron pair and
+  # neuropil, with average predicted transmitter scores per connection).
+  required_neuron_columns: [root_id, flow, super_class, cell_class, cell_sub_class, cell_type, top_nt, side]
+  required_connection_columns: [pre_pt_root_id, post_pt_root_id, neuropil, syn_count, ach_avg, glut_avg, gaba_avg]
+  # Minimum synapses for a neuron pair to become a simulated connection.
+  min_synapses: 1
+  # Columns holding the average predicted transmitter score per connection.
+  # The largest of these is the dominant transmitter for that connection.
+  connection_nt_columns:
+    acetylcholine: ach_avg
+    glutamate: glut_avg
+    gaba: gaba_avg
+    octopamine: oct_avg
+    serotonin: ser_avg
+    dopamine: da_avg
+  # Neurotransmitter -> sign. Configurable per the connectome-loading spec.
+  # v1 simplification: glutamate is excitatory.
+  neurotransmitter_signs:
+    acetylcholine: 1
+    glutamate: 1
+    gaba: -1
+    dopamine: -1
+    serotonin: -1
+    octopamine: -1
+    histamine: -1
+  # Applied when the dominant transmitter is absent or not in the map above.
+  unknown_sign: 0
+  warn_on_unknown_neurotransmitter: true
+
+# Subcircuit extraction. Roles come from annotation fields, never hard-coded
+# neuron IDs. `rules` is a list of {column, equals|contains|in|startswith, value}
+# tests, ANDed within a stage.
+#
+# `stages` is an ordered list in signal order. Each stage is capped after
+# ranking its candidates by the synapses they receive from the previously
+# selected stage, so every stage stays populated and the chain is not
+# truncated. Stage names that appear in `encoding.roles` / learning rules are
+# used as role labels downstream.
+#
+# cell_class values are the real FlyWire abbreviations: LA = lamina, ME =
+# medulla, LO = lobula, LOP = lobula plate; a ">" suffix names the neuron's
+# axonal projection (e.g. LA>ME = lamina projection neurons L1-L5).
+subcircuit:
+  candidate: medium
+  stages:
+    - name: photoreceptor
+      rules:
+        - {column: cell_class, equals: visual}
+        - {column: cell_type, equals: R1-6}
+      cap: 576
+    - name: lamina
+      rules:
+        - {column: cell_class, equals: "LA>ME"}
+      cap: 384
+    - name: medulla
+      rules:
+        - {column: cell_class, equals: "ME"}
+      cap: 384
+    - name: lobula
+      rules:
+        - {column: cell_class, in: ["LO", "LO>LOP", "LOP"]}
+      cap: 192
+    # Real reinforcement/peduncle neurons: 2x APL (GABA) and 2x DPM
+    # (dopamine) in release 783. These supply the teaching signal. Placed
+    # before mushroom_body so their real MBIN->Kenyon-cell edges are
+    # retained as an adjacent stage pair.
+    - name: reinforcement
+      rules:
+        - {column: cell_class, equals: MBIN}
+      cap: 4
+    - name: mushroom_body
+      rules:
+        - {column: cell_class, equals: Kenyon_Cell}
+      cap: 384
+    - name: output
+      rules:
+        - {column: cell_class, equals: MBON}
+      cap: 4
+  # Exclude neurons flagged as segmentation or biology outliers.
+  exclude_outliers: true
+  # Restrict the subcircuit to one hemisphere to halve the size. "" disables.
+  restrict_side: ""
+  # Max path length (in hops) used to verify photoreceptor -> output reachability.
+  max_path_hops: 8
+  # ARTIFICIAL COMPONENT. Kenyon cells receive no optic-lobe input in
+  # FlyWire release 783 (measured: 1 synapse from lobula, 2 from medulla),
+  # because the mushroom body is not a visual target in Drosophila. To keep the
+  # word -> mushroom body -> output pathway the experiment requires, one
+  # artificial lobula -> Kenyon cell synapse set is synthesised.
+  #
+  # This is NOT FlyWire connectivity and must never be reported as such. It is
+  # flagged `artificial` on every edge, counted in the manifest, and printed in
+  # the report. Source lobula neurons are chosen by REAL incoming strength from
+  # the selected upstream stages, so the bridge inherits real connectivity
+  # structure; only the synapse counts and signs are synthetic.
+  bridge:
+    enabled: true
+    # Synapses each Kenyon cell receives from the bridge. Kept small and sparse
+    # so the bridge cannot bypass the optic-lobe computation.
+    synapses_per_kc: 6
+    # Only the top-N lobula neurons by real upstream strength may bridge.
+    max_sources: 192
+    # Synthetic sign of bridge synapses.
+    sign: 1
+    # Weight applied to bridge synapses before the global calibration scale.
+    weight: 1.0
+
+network:
+  # Number of output neurons. Must equal encoding.n_categories.
+  n_outputs: 4
+  # Reserve pool of neurons born silent and unconnected (see structural spec).
+  reserve_size: 48
+  # Populations used as templates/recruitment targets, by role.
+  lif:
+    tau_ms: 20.0
+    # Synaptic current decay. Required: without a decay equation on I_syn the
+    # synaptic current integrates without bound and pins every neuron
+    # hyperpolarized, so the network can never fire.
+    tau_syn_ms: 5.0
+    v_threshold: 1.0
+    v_reset: 0.0
+    v_rest: 0.0
+    refractory_ms: 2.0
+    t_init_ms: 50.0
+  # Photoreceptor drive current per unit firing rate, in nA.
+  input_gain_na: 0.002
+  # Baseline input current for photoreceptors, in nA.
+  input_baseline_na: 0.0
+  # Poisson background drive. A deterministic feedforward LIF chain is exactly
+  # quiescent without a stimulus, so spontaneous firing needs an explicit
+  # source. This is DECLARED NOISE, not measured FlyWire connectivity.
+  noise:
+    enabled: true
+    rate_hz: 20.0
+    weight: 0.9
+  # Subthreshold background drive for every neuron, in the same units as
+  # v_threshold (1.0). A deterministic LIF network at rest is exactly silent,
+  # so calibration's nonzero lower rate bound can never be met without it.
+  # Keep it below v_threshold: spontaneous activity should arise from real
+  # recurrent connectivity, not from injected noise.
+  background_dc_na: 0.9
+  # Reward signal injected into the real reinforcement stage. The reward VALUE
+  # is synthetic; the neurons receiving it (APL/DPM) and their real synapses
+  # onto Kenyon cells are genuine FlyWire neurons and connections.
+  reward_gain_na: 0.01
+  punishment_gain_na: 0.01
+  # Time constant of the injected reward current, in ms.
+  reward_tau_ms: 120.0
+
+# Calibration (no external stimulus). The global weight scale is searched so
+# spontaneous firing sits inside the acceptable band without saturating.
+calibration:
+  enabled: true
+  # Global multiplier searched over `scale_grid`.
+  scale_grid: [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
+  simulated_ms: 300.0
+  # Settling time excluded from the measurement, in ms.
+  settle_ms: 50.0
+  min_mean_rate_hz: 0.5
+  max_mean_rate_hz: 15.0
+  # Fraction of neurons allowed to fire continuously (>= 1 spike per tau).
+  max_continuous_fraction: 0.02
+  # Reject scales whose drift exceeds this, in Hz.
+  max_rate_drift_hz: 5.0
+
+encoding:
+  # Pixel grid the rendered word is resampled onto. Must match the number of
+  # simulated photoreceptors, or the loader will error.
+  grid_rows: 24
+  grid_cols: 24
+  # Mapping scheme id, recorded in the manifest.
+  scheme_id: grid-v1
+  # Bundled font, relative to the package assets directory. Its sha256 is
+  # recorded in the manifest and checked when `verify_font` is true.
+  font_file: DejaVuSansMono.ttf
+  font_sha256: 602ec86b8948cfcd956482fe64f94c36c867770149ef2f791d4613f443bcecb3
+  verify_font: true
+  font_size_px: 64
+  letter_spacing_px: 8
+  image_size_px: [128, 128]
+  # Darkness -> firing rate. rate_hz = baseline_hz + span_hz * darkness.
+  baseline_hz: 2.0
+  max_hz: 120.0
+  # Gain applied to encoded rates before conversion to current, in nA/Hz.
+  rate_to_current_na: 0.002
+  # Presentation timing, in ms.
+  stimulus_ms: 300.0
+  rest_ms: 200.0
+  # Randomly permute pixel->photoreceptor assignments (control condition).
+  shuffle_pixels: false
+  # Seed for the permutation; defaults to the run seed when null.
+  shuffle_seed: null
+  # Category labels, in the fixed order used for output neuron indices.
+  categories: [animal, food, tool, place]
+
+learning:
+  # Dopamine-gated three-factor rule at Kenyon cell -> output synapses.
+  enabled: true
+  learning_rate: 0.02
+  # Eligibility trace: increases on pre/post coincidence, decays with tau.
+  trace_tau_ms: 400.0
+  # Trace gain per coincident pre/post pair event.
+  trace_increment: 0.02
+  # Reward/punishment magnitudes delivered after each trial.
+  reward: 1.0
+  punishment: -1.0
+  w_min: 0.0
+  w_max: 1.0
+  # Only these pathways are plastic.
+  plastic_roles: [mushroom_body_output]
+  # Synapse-level weight noise, dimensionless.
+  weight_noise: 0.0
+
+structural:
+  # Master ablation switch.
+  enabled: true
+  # Run the structural step every N trials.
+  check_every_n_trials: 25
+  # Pruning: weight below threshold for N consecutive checks.
+  prune_weight_threshold: 0.01
+  prune_consecutive_checks: 2
+  # Silencing: mean rate below threshold (Hz) over a window of trials.
+  silence_rate_threshold_hz: 0.1
+  silence_window_trials: 50
+  # Recruitment: how often to attempt growth, and how much to clone.
+  recruit_every_n_checks: 4
+  recruit_weight_fraction: 0.2
+  recruit_noise: 0.05
+  # Rate limits.
+  max_prunes_per_interval: 64
+  max_silences_per_interval: 8
+  max_recruits_per_interval: 4
+  # Total fraction of the plastic pathway that may be pruned or silenced.
+  max_total_fraction_pruned: 0.5
+  max_total_fraction_silenced: 0.25
+  # Roles eligible for structural change.
+  plasticity_roles: [mushroom_body, output]
+
+evaluation:
+  # Train/test split per category, out of 20 words each.
+  train_per_category: 15
+  test_per_category: 5
+  # Conditions reported in the final table.
+  conditions:
+    - untrained
+    - trained
+    - shuffled_labels
+    - dopamine_off
+    - shuffled_pixels
+    - structural_on
+    - structural_off
+  chance_level: 0.25
+  # Number of independent seeds. Minimum 10 per the evaluation spec.
+  n_seeds: 10
+  base_seed: 1000
+  # Two-sided significance level for the one-sample test against chance.
+  significance_level: 0.01
+  # Bootstrap resamples for the confidence interval.
+  ci_resamples: 10000
+  ci_level: 0.95
+  # Training trials per seed.
+  n_train_trials: 600
+  # Trials per learning-curve window.
+  curve_window_trials: 50
+  # Held-out evaluation repetitions per word, to reduce response noise.
+  eval_repeats: 3
+  # Raise a data-leakage warning when shuffled labels beat chance by this much.
+  leakage_margin: 0.05
+
+benchmark:
+  # Task 0 feasibility gate.
+  simulated_ms: 500.0
+  settle_ms: 50.0
+  # Wall-clock budget for the whole multi-seed experiment, in minutes.
+  wall_clock_limit_min: 120.0
+  # Fail the gate if peak memory exceeds this fraction of the memory budget.
+  memory_headroom: 0.8
+
+resources:
+  # Hard memory budget for loading + building the subcircuit, in MB.
+  memory_budget_mb: 4096

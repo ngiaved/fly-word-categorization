@@ -1,0 +1,29 @@
+Brian2==2.9.0
+Cython==3.3.0
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.66.1
+iniconfig==2.3.0
+kiwisolver==1.5.1
+matplotlib==3.11.2
+mpmath==1.3.0
+numpy==1.26.4
+packaging==26.3
+pillow==12.3.0
+pluggy==1.6.0
+psutil==7.2.2
+pyarrow==25.0.1
+Pygments==2.21.0
+pyparsing==3.3.3
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+scipy==1.17.1
+six==1.17.0
+sympy==1.14.0
+
+# Dev / transitive versions captured by `pip freeze` on the reference machine.
+# NOTE: numpy must stay <2.0: brian2 2.9.0 references numpy.ndarray.ptp,
+# which numpy 2.0 removed. See README "Pinning notes".

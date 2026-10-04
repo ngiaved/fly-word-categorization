@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flyread"
+version = "0.1.0"
+description = "Dopamine-gated plasticity in a FlyWire connectome subcircuit for 4-letter word categorization"
+readme = "README.md"
+requires-python = "==3.11.*"
+license = { file = "LICENSE" }
+
+# Pinned exactly. `requirements.lock.txt` is the authoritative environment
+# record; these are the direct dependencies only.
+dependencies = [
+    "Brian2==2.9.0",
+    "numpy==1.26.4",
+    "pyarrow==25.0.1",
+    "PyYAML==6.0.3",
+    "pillow==12.3.0",
+    "scipy==1.17.1",
+    "matplotlib==3.11.2",
+    "psutil==7.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+flyread = "flyread.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flyread = ["assets/*.ttf", "assets/LICENSE_DEJAVU"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: long-running tests, deselect with -m 'not slow'",
+]

@@ -1,0 +1,19 @@
+# FlyWire / dataset artifacts.
+# FlyWire data is licensed CC-BY-NC 4.0 and is NOT redistributable,
+# so it is never committed. `flyread fetch-data` downloads it.
+data/flywire/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Run outputs (manifests, reports, event logs) are regenerated, not committed.
+runs/
+results/
+report/
