@@ -273,8 +273,11 @@ def build_network(
     adjacent = {
         (ordered_stages[i], ordered_stages[i + 1])
         for i in range(len(ordered_stages) - 1)
-    } | set(subcircuit.roles) | plastic_pairs | artificial_pairs
+    } | {(name, name) for name in subcircuit.roles} | plastic_pairs | artificial_pairs
 
+    pair_weight_normalisation = str(
+        config.get("network.pair_weight_normalisation", "mean_synapses")
+    )
     trace_tau = float(config.get("learning.trace_tau_ms"))
     trace_increment = float(config.get("learning.trace_increment"))
     w_min = float(config.get("learning.w_min"))
@@ -322,7 +325,23 @@ def build_network(
         # plastic set keeps a NONNEGATIVE magnitude in plastic.weights while
         # syn.w carries the signed current, so w_min/w_max clipping can never
         # flip an inhibitory synapse to excitatory.
-        magnitude = n_syn * float(weight_scale)
+        #
+        # Raw synapse counts are normalised per stage pair. Without this,
+        # `weight_scale` has wildly different physical meaning in each pair:
+        # mushroom_body -> reinforcement averages 29 synapses per edge while
+        # reinforcement -> mushroom_body averages 0.5, so that one excitatory
+        # feedback loop is ~58x stronger than its return path. The network is
+        # then bistable -- exactly 0 Hz below threshold, 125-440 Hz above it --
+        # and no weight scale can reach the calibration band. Normalising by
+        # the pair's mean synapse count makes `weight_scale` the mean edge
+        # weight everywhere, so loop gain follows edge counts rather than
+        # synapse counts.
+        normalisation = 1.0
+        if pair_weight_normalisation == "mean_synapses" and len(n_syn):
+            mean_syn = float(n_syn.mean())
+            if mean_syn > 0.0:
+                normalisation = mean_syn
+        magnitude = n_syn / normalisation * float(weight_scale)
         weight = sign * magnitude
         syn.w = weight.tolist()
         if is_plastic:
@@ -330,9 +349,9 @@ def build_network(
         synaptic_groups[role_pair] = syn
         synapse_signs[role_pair] = sign
         LOGGER.info(
-            "synapses %-28s n=%6d sign(%+d/%d) scale=%.4g",
+            "synapses %-28s n=%6d sign(%+d/%d) mean_syn=%.4g norm=%.4g scale=%.4g",
             role_pair, len(weight), int((sign > 0).sum()), int((sign < 0).sum()),
-            weight_scale,
+            float(n_syn.mean()) if len(n_syn) else 0.0, normalisation, weight_scale,
         )
         if is_plastic:
             plastic = PlasticSynapses(

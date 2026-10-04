@@ -179,7 +179,16 @@ network:
   # so calibration's nonzero lower rate bound can never be met without it.
   # Keep it below v_threshold: spontaneous activity should arise from real
   # recurrent connectivity, not from injected noise.
-  background_dc_na: 0.9
+  background_dc_na: 0.2
+  # How raw synapse counts become synaptic weights. Raw counts are not
+  # comparable across stage pairs: mushroom_body -> reinforcement averages 29
+  # synapses per edge, reinforcement -> mushroom_body averages 0.5, so that
+  # single excitatory feedback loop is ~58x stronger than its return path. The
+  # network is then bistable (exactly 0 Hz below threshold, 125-440 Hz above)
+  # and NO weight scale can reach the calibration band. Normalising by each
+  # pair's mean synapse count makes `weight_scale` mean the same thing
+  # everywhere, so loop gain follows edge counts instead of synapse counts.
+  pair_weight_normalisation: mean_synapses
   # Reward signal injected into the real reinforcement stage. The reward VALUE
   # is synthetic; the neurons receiving it (APL/DPM) and their real synapses
   # onto Kenyon cells are genuine FlyWire neurons and connections.
