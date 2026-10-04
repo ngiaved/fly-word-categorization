@@ -70,24 +70,23 @@ def measure_throughput(network, config, label: str = "network") -> BenchmarkResu
     settle_ms = float(config.get("benchmark.settle_ms"))
     dt = float(config.get("simulation.dt"))
 
-    monitor = b2.SpikeMonitor(
-        [group.group for group in network.stages.values()], record=False
-    )
-    network.brian.add(monitor)
+    monitors = []
+    for group in network.stages.values():
+        m = b2.SpikeMonitor(group.group, record=False)
+        monitors.append(m)
+    network.brian.add(*monitors)
     network.brian.run(settle_ms * b2.ms)
-    # Spikes before the measured window must not be counted.
     from .network import clear_monitors
-
-    clear_monitors([monitor])
+    clear_monitors(monitors)
     gc.collect()
-
     before = _peak_rss_mb()
     started = time.perf_counter()
     network.brian.run(simulated_ms * b2.ms)
     wall = time.perf_counter() - started
     peak = max(before, _peak_rss_mb())
-    spikes = int(monitor.num_spikes)
-    network.brian.remove(monitor)
+    spikes = sum(int(m.num_spikes) for m in monitors)
+    for m in monitors:
+        network.brian.remove(m)
 
     steps = simulated_ms / dt
     return BenchmarkResult(
