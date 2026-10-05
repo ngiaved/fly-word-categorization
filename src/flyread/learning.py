@@ -354,17 +354,19 @@ class TrialRunner:
             self.stats.weight_sum_start = float(self.network.plastic.weights.sum())
 
         clear_monitors(self._monitors.values())
+        count_base = self.snapshot_counts()
         self._apply_stimulus(word)
         self.network.brian.run(timing.stimulus_ms * b2.ms)
 
+        window = self._window_counts(count_base)
         counts = np.zeros(len(self.network.output_indices), dtype=np.int64)
         for position, internal in enumerate(self.network.output_indices):
             stage, local = self._output_locations[int(internal)]
-            counts[position] = int(self._monitors[stage].count[local])
+            counts[position] = int(window[stage][local])
 
-        # Snapshot per-stage rates while the monitors still hold stimulus-time
-        # spikes; they are cleared for the rest period immediately afterwards.
-        stimulus_rate = self.stage_rates_hz(timing.stimulus_ms)
+        # Snapshot per-stage rates while the counts still hold stimulus-time
+        # spikes only; the window baseline keeps them from including history.
+        stimulus_rate = self.stage_rates_hz(timing.stimulus_ms, count_base)
 
         result = readout(
             counts, seed=self.seed,
@@ -420,17 +422,51 @@ class TrialRunner:
         )
         return record
 
-    def stage_rates_hz(self, duration_ms: float) -> dict[str, float]:
+    def snapshot_counts(self) -> dict[str, np.ndarray]:
+        """Copy the monitors' cumulative spike counters.
+
+        ``SpikeMonitor.count`` is cumulative across ``run()`` calls and is
+        declared read-only, so ``clear_monitors`` cannot reset it: Brian2
+        rebinds ``count`` on every run and the in-place zeroing is discarded.
+        The previous code relied on that clear, so the readout summed every
+        spike the network had ever produced. Presenting the same word with an
+        identical stimulus index returned 4, 8, 13, 16, 21 spikes on
+        successive trials, and per-stage rates grew without bound.
+        """
+        return {
+            name: np.asarray(monitor.count, dtype=np.int64).copy()
+            for name, monitor in self._monitors.items()
+        }
+
+    def _window_counts(
+        self, base: dict[str, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        """Spikes recorded since ``base``, per stage."""
+        return {
+            name: np.maximum(
+                np.asarray(monitor.count, dtype=np.int64) - base.get(
+                    name, np.zeros_like(np.asarray(monitor.count))
+                ),
+                0,
+            )
+            for name, monitor in self._monitors.items()
+        }
+
+    def stage_rates_hz(
+        self, duration_ms: float, base: dict[str, np.ndarray] | None = None
+    ) -> dict[str, float]:
         """Mean firing rate per stage over the window just simulated.
 
         Must be called before the monitors are cleared for the rest period.
+        ``base`` is the snapshot taken just before the window, so the rate
+        reflects this window only and not the whole session.
         """
         if duration_ms <= 0:
             return {name: 0.0 for name in self.network.stages}
+        counts = self._window_counts(base or {})
         return {
-            name: float(np.asarray(monitor.count, dtype=np.float64).mean())
-            * 1000.0 / duration_ms
-            for name, monitor in self._monitors.items()
+            name: float(values.mean()) * 1000.0 / duration_ms
+            for name, values in counts.items()
         }
 
     def _deliver_teaching(self, dopamine: float, trial_index: int = 0) -> float:

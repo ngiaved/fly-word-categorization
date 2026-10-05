@@ -133,9 +133,14 @@ def _prepare(config: Config, args, run_id: str | None = None):
         "rest_ms": float(config.get("encoding.rest_ms")),
         "dt_ms": float(config.get("simulation.dt")),
     }
-    manifest.encoding["rate_to_current_na"] = float(
-        config.get("encoding.rate_to_current_na")
+    manifest.encoding["rate_to_current"] = (
+        "derived by inverting the LIF rate-current relation; no fixed nA/Hz gain"
     )
+    manifest.encoding["lif_drive"] = {
+        "tau_ms": float(config.get("network.lif.tau_ms")),
+        "v_threshold": float(config.get("network.lif.v_threshold")),
+        "v_rest": float(config.get("network.lif.v_rest")),
+    }
     manifest.encoding["baseline_hz"] = float(config.get("encoding.baseline_hz"))
     manifest.encoding["max_hz"] = float(config.get("encoding.max_hz"))
 

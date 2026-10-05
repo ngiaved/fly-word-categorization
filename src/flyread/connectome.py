@@ -531,6 +531,35 @@ def assign_signs(
 # Subcircuit extraction
 # --------------------------------------------------------------------------
 
+def _plastic_drive(
+    targets: set[int],
+    sources: set[int],
+    edges_pre: np.ndarray,
+    edges_post: np.ndarray,
+    edges_n: np.ndarray,
+) -> dict[int, float]:
+    """Relative plastic drive each target receives, at unit ``weight_scale``.
+
+    This mirrors ``network.build_network``'s ``fan_in`` rule, where an edge
+    carries ``weight_scale / synapse_count``. Balancing on raw synapse COUNT is
+    not enough: with per-edge weights inversely proportional to synapse count,
+    a target with 14 edges can still draw several times the current of one with
+    3. Unit scale keeps the comparison independent of the calibration search.
+    """
+    if not targets or not sources:
+        return {}
+    in_sources = np.isin(edges_pre, list(sources))
+    in_targets = np.isin(edges_post, list(targets))
+    mask = in_sources & in_targets
+    if not mask.any():
+        return {}
+    totals: dict[int, float] = defaultdict(float)
+    for post, n_syn in zip(edges_post[mask].tolist(), edges_n[mask].tolist()):
+        if n_syn > 0:
+            totals[int(post)] += 1.0 / float(n_syn)
+    return totals
+
+
 def _incoming_strength(
     ids: set[int],
     upstream: set[int],
@@ -709,6 +738,21 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
     backward_chain = [
         str(s) for s in (config.get("subcircuit.selection.backward_chain") or [])
     ]
+    balance_outputs = bool(
+        config.get("subcircuit.selection.balance_outputs", True)
+    )
+    # A readout neuron with a single plastic synapse cannot be compared against
+    # one with many: one presynaptic spike saturates it, so it either always
+    # wins or never fires. Require a workable minimum before balancing.
+    min_plastic_input = int(
+        config.get("subcircuit.selection.min_plastic_input", 3)
+    )
+    # Two readouts fed by the same Kenyon cells can never respond differently,
+    # so their input overlap is capped. This only chooses among real MBON
+    # neurons; no edge is synthesised.
+    max_readout_overlap = float(
+        config.get("subcircuit.selection.max_readout_overlap", 0.5)
+    )
     preselected: dict[str, list[int]] = {}
     seed_rule_detail: dict[str, str] = {}
     if len(backward_chain) >= 2:
@@ -788,20 +832,130 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
             strength = _incoming_strength(
                 set(pool), upstream, edges_pre, edges_post, edges_n
             ) if pool else {}
-            ranked = sorted(
-                pool, key=lambda r: (-strength.get(r, 0), r)
-            ) if pool else []
-            chosen = ranked[:cap]
-            if upstream:
-                rule = (
-                    "top N candidates by synapses received from the previously "
-                    "selected stages; ties broken by ascending root_id"
-                )
+            # The readout neurons must be comparable in how much plastic drive
+            # they receive. Ranking them purely by input strength picks the
+            # most strongly driven MBON neurons, and measured on release 783
+            # that gave a 248:1 spread in total mushroom_body -> output drive
+            # (1, 19, 2 and 6 synapses). One neuron then won essentially every
+            # argmax, so every trial was punished, dopamine decayed all weights
+            # uniformly, and there was no category signal left to learn from.
+            # Balance is enforced by choosing neurons whose incoming strength
+            # is closest to a common target; the edges stay real.
+            if balance_outputs and name in OUTPUT_STAGES and pool:
+                # Balance on the plastic drive specifically: incoming synapses
+                # from the mushroom body. Balancing on total input from every
+                # upstream stage would also count reinforcement and optic-lobe
+                # edges and can pick a readout with no mushroom-body input at
+                # all, which is worse than the asymmetry it replaces.
+                mb_pool = set()
+                for mb_name in MUSHROOM_BODY_STAGES:
+                    mb_pool |= set(selected.get(mb_name) or [])
+                plastic_strength = _incoming_strength(
+                    set(pool), mb_pool, edges_pre, edges_post, edges_n
+                ) if pool and mb_pool else {}
+                drive = _plastic_drive(
+                    set(pool), mb_pool, edges_pre, edges_post, edges_n
+                ) if pool and mb_pool else {}
+                # Rank on the drive the neuron will actually receive, and keep
+                # only neurons with enough presynaptic contacts to be tunable.
+                driven_pool = [
+                    r for r in pool
+                    if plastic_strength.get(r, 0) >= min_plastic_input
+                    and drive.get(r, 0.0) > 0.0
+                ]
+                if len(driven_pool) >= cap:
+                    # Which Kenyon cells feed each candidate, so overlaps can
+                    # be compared directly.
+                    inputs: dict[int, set[int]] = defaultdict(set)
+                    for pre_root, post_root in zip(
+                        edges_pre.tolist(), edges_post.tolist()
+                    ):
+                        if post_root in set(driven_pool) and pre_root in mb_pool:
+                            inputs[post_root].add(pre_root)
+                    ordered = sorted(
+                        driven_pool, key=lambda r: (-drive[r], r)
+                    )[: max(cap * 16, cap)]
+                    values = sorted(drive[r] for r in ordered)
+                    target = values[len(values) // 2]
+
+                    def _overlap(a: int, b: int) -> float:
+                        sa, sb = inputs.get(a, set()), inputs.get(b, set())
+                        union = sa | sb
+                        return len(sa & sb) / len(union) if union else 1.0
+
+                    # Balance drive, but refuse to pick two readouts that share
+                    # the same Kenyon-cell input. Balancing alone selected two
+                    # MBON neurons with identical input (Jaccard 1.00, 20/20
+                    # shared), so a quarter of the readout could never respond
+                    # differently and the output was flat for every word.
+                    ranked_balanced = sorted(
+                        ordered,
+                        key=lambda r: (abs(drive[r] - target), -drive[r], r),
+                    )
+                    chosen = [ranked_balanced[0]]
+                    for cand in ranked_balanced[1:]:
+                        if len(chosen) >= cap:
+                            break
+                        if all(
+                            _overlap(cand, kept) <= max_readout_overlap
+                            for kept in chosen
+                        ):
+                            chosen.append(cand)
+                    # If the overlap limit cannot be met, keep the most
+                    # distinct set available rather than dropping to fewer
+                    # readouts than the experiment needs.
+                    if len(chosen) < cap:
+                        for cand in ranked_balanced:
+                            if len(chosen) >= cap:
+                                break
+                            if cand not in chosen:
+                                chosen.append(cand)
+                    chosen = sorted(chosen, key=lambda r: r)
+                    worst = max(
+                        (
+                            _overlap(chosen[i], chosen[j])
+                            for i in range(len(chosen))
+                            for j in range(i + 1, len(chosen))
+                        ),
+                        default=0.0,
+                    )
+                    spread = (
+                        max(drive[r] for r in chosen)
+                        / max(min(drive[r] for r in chosen), 1e-12)
+                    )
+                    rule = (
+                        f"balanced readout with distinct inputs: {cap} "
+                        f"candidates chosen for near-equal mushroom_body drive "
+                        f"(max/min {spread:.1f}x) and pairwise input overlap at "
+                        f"most {max_readout_overlap:.2f} (achieved worst "
+                        f"{worst:.2f}); at least {min_plastic_input} plastic "
+                        f"synapses each"
+                    )
+                else:
+                    ranked = sorted(
+                        pool, key=lambda r: (-strength.get(r, 0), r)
+                    )
+                    chosen = ranked[:cap]
+                    rule = (
+                        "top N candidates by synapses received from the "
+                        "previously selected stages; ties broken by "
+                        "ascending root_id"
+                    )
             else:
-                rule = (
-                    "input stage: all candidates in root_id order, truncated to "
-                    "the cap"
-                )
+                ranked = sorted(
+                    pool, key=lambda r: (-strength.get(r, 0), r)
+                ) if pool else []
+                chosen = ranked[:cap]
+                if upstream:
+                    rule = (
+                        "top N candidates by synapses received from the previously "
+                        "selected stages; ties broken by ascending root_id"
+                    )
+                else:
+                    rule = (
+                        "input stage: all candidates in root_id order, truncated to "
+                        "the cap"
+                    )
         selected[name] = chosen
         selection_detail[name] = {
             "rule": rule,
@@ -914,6 +1068,7 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
             max_sources = int(config.get("subcircuit.bridge.max_sources"))
             sign = int(config.get("subcircuit.bridge.sign"))
             n_syn = int(config.get("subcircuit.bridge.weight"))
+            seed = int(config.get("subcircuit.bridge.seed", 20240917))
 
             # Rank lobula sources by synapses received from the stages actually
             # selected upstream of them, measured on real edges.
@@ -935,10 +1090,27 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
             if not sources or not targets:
                 bridge_info["skipped"] = "no lobula sources or no Kenyon cell targets"
             else:
-                for i, target in enumerate(targets):
-                    # Deterministic round-robin over strength-ranked sources.
-                    for k in range(per_kc):
-                        source = sources[(i + k) % len(sources)]
+                per_kc = min(int(config.get("subcircuit.bridge.synapses_per_kc")), len(sources))
+                rng = np.random.default_rng(seed)
+                patterns: set[tuple[int, ...]] = set()
+                for target in targets:
+                    # Idiosyncratic sparse projection per Kenyon cell. The
+                    # previous round-robin took sources[(i + k) % n_sources], so
+                    # with 24 targets and 12 sources the input sets repeated
+                    # every n_sources targets and each set was a window of
+                    # per_kc consecutive sources. That collapsed 24 Kenyon
+                    # cells into 12 heavily overlapping patterns, leaving the
+                    # population near-identical and giving reinforcement no
+                    # word-specific pattern to strengthen. A seeded draw gives
+                    # each cell its own subset and stays reproducible.
+                    picked = sorted(
+                        sources[p]
+                        for p in rng.choice(
+                            len(sources), size=per_kc, replace=False
+                        )
+                    )
+                    patterns.add(tuple(picked))
+                    for source in picked:
                         internal_edges.append(
                             (
                                 index[source],
@@ -958,6 +1130,12 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
                     "synapses_per_pair": n_syn,
                     "n_edges": len(targets) * per_kc,
                     "n_synapses": len(targets) * per_kc * n_syn,
+                    "seed": seed,
+                    "distinct_input_patterns": len(patterns),
+                    "input_pattern_rule": (
+                        "seeded sparse random subset of the strength-ranked "
+                        "lobula sources, drawn independently per Kenyon cell"
+                    ),
                     "source_selection": (
                         "top lobula neurons by synapses received from selected "
                         "upstream stages, ties by ascending root_id"

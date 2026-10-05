@@ -403,12 +403,42 @@ def darkness_to_rate(darkness: np.ndarray, config) -> np.ndarray:
 def rate_to_current(rates_hz: np.ndarray, config) -> np.ndarray:
     """Firing rate in Hz to photoreceptor input current in nA.
 
-    current_nA = rate_hz * rate_to_current_na
+    The current is derived by inverting the leaky integrate-and-fire
+    rate-current relation for the configured cell, so the encoded rate is the
+    rate the neuron actually reaches. For a constant current ``I`` the
+    membrane settles at ``v_inf = I * tau`` and fires at
 
-    Units: Hz * nA/Hz = nA.
+        f = 1 / (tau * ln(v_inf / (v_inf - v_threshold)))
+
+    so inverting gives ``v_inf = e^k * v_threshold / (e^k - 1)`` with
+    ``k = 1 / (f * tau)``, and ``I = (v_inf - v_rest) / tau``.
+
+    A single scalar gain cannot do this. The earlier fixed gain of
+    0.002 nA/Hz put ``v_inf`` near 0.003 against a threshold of 1.0, roughly
+    360x too weak for a stimulated photoreceptor to reach threshold, so every
+    stage fired at spontaneous-noise rates and the output collected 0-2 spikes
+    per stimulus window. Any output then could not depend on the word, and no
+    reward signal could exist to learn from.
     """
-    gain = float(config.get("encoding.rate_to_current_na"))
-    return np.asarray(rates_hz, dtype=np.float64) * gain
+    rates = np.asarray(rates_hz, dtype=np.float64)
+    tau_s = float(config.get("network.lif.tau_ms")) * 1e-3
+    v_threshold = float(config.get("network.lif.v_threshold"))
+    v_rest = float(config.get("network.lif.v_rest"))
+    if tau_s <= 0.0:
+        raise EncodingError(f"LIF tau must be positive, got {tau_s}")
+
+    # Zero rate means no drive at all rather than an infinite negative current.
+    positive = rates > 0.0
+    out = np.zeros_like(rates)
+    if not positive.any():
+        return out
+    # k diverges as the rate approaches zero, but v_inf -> v_threshold there,
+    # so the current tends to the finite threshold current.
+    k = 1.0 / np.maximum(rates[positive] * tau_s, 1e-12)
+    exp_k = np.exp(np.minimum(k, 700.0))
+    v_inf = exp_k * v_threshold / np.maximum(exp_k - 1.0, 1e-12)
+    out[positive] = (v_inf - v_rest) / tau_s
+    return out
 
 
 def encode_word(

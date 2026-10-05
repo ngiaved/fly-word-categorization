@@ -511,11 +511,114 @@ class CalibrationResult:
         }
 
 
-def clear_monitors(monitors) -> None:
-    """Zero spike counts on SpikeMonitors built with ``record=False``.
+def single_spike_psp(weight: float, tau_s: float, tau_syn_s: float) -> float:
+    """Peak membrane excursion caused by one synaptic spike.
 
-    Those monitors expose ``count`` but have no ``clear()`` method, so counts
-    must be reset in place.
+    A spike sets ``I_syn`` to ``weight``; it then decays with ``tau_syn`` while
+    the membrane relaxes with ``tau``. Convolving the two gives
+
+        v(t) = (w / tau) * exp(-t / tau) * (exp(a t) - 1) / a,
+        a = 1 / tau - 1 / tau_syn,
+
+    which peaks at ``t* = ln(tau_syn / tau) / a``.
+    """
+    if tau_s <= 0.0 or tau_syn_s <= 0.0:
+        return 0.0
+    a = 1.0 / tau_s - 1.0 / tau_syn_s
+    if abs(a) < 1e-12:
+        # tau == tau_syn: v(t) = (w / tau) * t * exp(-t / tau), peak at t = tau.
+        return weight * float(np.exp(-1.0))
+    t_star = float(np.log(tau_syn_s / tau_s) / a)
+    if t_star <= 0.0:
+        return 0.0
+    return float(
+        (weight / tau_s)
+        * np.exp(-t_star / tau_s)
+        * (np.exp(a * t_star) - 1.0)
+        / a
+    )
+
+
+def transmission_weight(config) -> float:
+    """Smallest synaptic weight for which one spike reaches ``v_threshold``.
+
+    With the configured cell this is 6.35 nA, so any calibration point whose
+    strongest edge is weaker than this cannot fire a postsynaptic neuron from
+    any input. Such a point satisfies the spontaneous-rate band only because
+    the network is silent, which is why the band alone is not sufficient.
+    """
+    tau_s = float(config.get("network.lif.tau_ms")) * 1e-3
+    tau_syn_s = float(config.get("network.lif.tau_syn_ms")) * 1e-3
+    v_threshold = float(config.get("network.lif.v_threshold"))
+    v_rest = float(config.get("network.lif.v_rest"))
+    per_unit = single_spike_psp(1.0, tau_s, tau_syn_s)
+    if per_unit <= 0.0:
+        return float("inf")
+    return (v_threshold - v_rest) / per_unit
+
+
+def drives_response(net, config) -> dict[str, Any]:
+    """Check that a stimulus actually propagates to the readout.
+
+    A single-spike bound is not usable here. With ``fan_in`` normalisation an
+    edge weighs ``weight_scale / synapse_count``; ``synapse_count`` has minimum
+    1, so the strongest edge equals ``weight_scale`` and single-spike
+    transmission would need ``weight_scale >= 6.35``. Every such point drives
+    spontaneous rates of 23 Hz and above, outside the 0.5-15 Hz band, so no
+    candidate can satisfy both. The bound is therefore recorded but not
+    enforced, and transmission is measured instead: the photoreceptors are
+    driven with a current that reliably reaches threshold and the readout is
+    checked for spikes. That is the property that actually matters, and it
+    holds for summed drive from many presynaptic spikes.
+    """
+    import brian2 as b2
+
+    probe_ms = float(config.get("encoding.stimulus_ms"))
+
+    monitors = {
+        name: b2.SpikeMonitor(stage.group, record=False)
+        for name, stage in net.stages.items()
+    }
+    net.brian.add(list(monitors.values()))
+    # Drive with the strongest current the encoder can actually produce for
+    # ``encoding.max_hz``. An arbitrary multiple of threshold would let a
+    # candidate pass that no real stimulus could drive.
+    from .encoding import rate_to_current
+
+    probe_current = float(
+        rate_to_current(
+            np.array([float(config.get("encoding.max_hz"))]), config
+        )[0]
+    )
+    net.stages["photoreceptor"].group.I_syn = probe_current
+    net.brian.run(probe_ms * b2.ms)
+    output = int(np.asarray(monitors["output"].count, dtype=np.int64).sum())
+    for monitor in monitors.values():
+        try:
+            net.brian.remove(monitor)
+        except KeyError:
+            pass
+    net.stages["photoreceptor"].group.I_syn = 0.0
+    v_rest_value = float(config.get("network.lif.v_rest"))
+    for stage in net.stages.values():
+        stage.group.v = v_rest_value
+        stage.group.I_syn = 0.0
+    return {"output_spikes": output, "transmits": bool(output > 0)}
+
+
+def clear_monitors(monitors) -> None:
+    """Attempt to zero spike counts on SpikeMonitors built with ``record=False``.
+
+    This does NOT work and must not be relied upon. ``count`` is registered as
+    a read-only dynamic array and Brian2 rebinds it on every ``run()``, so the
+    in-place zeroing below is written to an array that is immediately
+    discarded; the counter stays cumulative. Presenting one word repeatedly
+    returned 4, 8, 13, 16, 21 spikes on successive trials, which is the sum of
+    every spike so far rather than the spikes in that trial.
+
+    Per-window counts are therefore computed as the difference between the
+    counter before and after the window; see ``TrialRunner.snapshot_counts``.
+    This helper is kept only so existing call sites read clearly.
     """
     for monitor in monitors:
         counts = monitor.count
@@ -543,18 +646,28 @@ def measure_spontaneous_activity(
     }
     network.brian.add(list(monitors.values()))
     network.brian.run(settle_ms * b2.ms)
-    clear_monitors(monitors.values())
+    # ``count`` is cumulative and cannot be zeroed, so subtract the settled
+    # spikes explicitly; otherwise the settle period is folded into the
+    # measured window and inflates the reported rate.
+    settled = {
+        name: np.asarray(monitor.count, dtype=np.int64).copy()
+        for name, monitor in monitors.items()
+    }
 
     measure_ms = max(simulated_ms - settle_ms, 1.0)
     started = time.perf_counter()
     network.brian.run(measure_ms * b2.ms)
     wall_seconds = time.perf_counter() - started
 
-    elapsed_s = measure_ms * 1e-3
+    # These monitors are per-candidate scratch objects. Leaving them attached
+    # would accumulate one set per calibration attempt on the same network.
     per_stage = {
-        name: np.asarray(monitor.count, dtype=np.float64)
+        name: np.maximum(
+            np.asarray(monitor.count, dtype=np.float64) - settled[name], 0.0
+        )
         for name, monitor in monitors.items()
     }
+    elapsed_s = measure_ms * 1e-3
     counts = np.concatenate(list(per_stage.values()))
 
     n_neurons = int(counts.size)
@@ -587,7 +700,11 @@ def measure_spontaneous_activity(
         first_rate = second_rate = 0.0
         rate_drift = 0.0
 
-    network.brian.remove(list(monitors.values()))
+    for monitor in monitors.values():
+        try:
+            network.brian.remove(monitor)
+        except KeyError:
+            pass
     return {
         "mean_rate_hz": mean_rate,
         "max_rate_hz": float(rates.max()) if n_neurons else 0.0,
@@ -640,6 +757,15 @@ def calibrate(
     )
     max_continuous = float(config.get("calibration.max_continuous_fraction"))
     max_drift = float(config.get("calibration.max_rate_drift_hz"))
+    required_weight = transmission_weight(config)
+
+    def _strongest_edge(net) -> float:
+        strongest = 0.0
+        for syn in net.synaptic_groups.values():
+            weights = np.abs(np.asarray(syn.w, dtype=np.float64))
+            if weights.size:
+                strongest = max(strongest, float(weights.max()))
+        return strongest
 
     attempts: list[dict[str, float]] = []
     for dc, noise_weight in itertools.product(dc_grid, noise_grid):
@@ -672,16 +798,24 @@ def calibrate(
             in_band = band[0] <= stats["mean_rate_hz"] <= band[1]
             not_saturated = stats["continuous_fraction"] <= max_continuous
             stable = stats["rate_drift_hz"] <= max_drift
-            attempt["accepted"] = bool(in_band and not_saturated and stable)
+            strongest = _strongest_edge(network)
+            transmits = drives_response(network, trial_config)["transmits"]
+            attempt["strongest_edge"] = strongest
+            attempt["single_spike_bound"] = required_weight
+            attempt["transmits"] = transmits
+            attempt["accepted"] = bool(
+                in_band and not_saturated and stable and transmits
+            )
             attempt["in_band"] = bool(in_band)
             attempt["not_saturated"] = bool(not_saturated)
             attempt["stable"] = bool(stable)
             attempts.append(attempt)
             LOGGER.info(
                 "calibration scale=%-7g dc=%-5g noise=%-5g mean=%6.2f Hz "
-                "cont=%.3f drift=%6.2f -> %s",
+                "cont=%.3f drift=%6.2f transmits=%s -> %s",
                 scale, used_dc, used_noise, stats["mean_rate_hz"],
                 stats["continuous_fraction"], stats["rate_drift_hz"],
+                transmits,
                 "ACCEPT" if attempt["accepted"] else "reject",
             )
             if attempt["accepted"]:

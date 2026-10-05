@@ -137,6 +137,23 @@ subcircuit:
     # candidate pool, then each earlier stage by what it sends to the stage
     # already seeded, keeps every edge real. Listed in signal order.
     backward_chain: [photoreceptor, lamina, medulla, lobula]
+    # Choose the output neurons so their incoming mushroom_body drive is
+    # comparable. Ranking them by input strength alone selects the most
+    # strongly driven MBON neurons, which on release 783 produced a 248:1
+    # spread in total plastic drive; one neuron then won every argmax, every
+    # trial was punished, and dopamine decayed all weights uniformly. The
+    # edges stay real; only which real readouts are used changes.
+    balance_outputs: true
+    # A readout with a single plastic synapse saturates on one presynaptic
+    # spike, so it can only ever win or never fire. Require a workable
+    # minimum of mushroom_body input before balancing.
+    min_plastic_input: 3
+    # Cap on how much Kenyon-cell input two readouts may share. Two MBON
+    # neurons fed by the same Kenyon cells can never respond differently; a
+    # balance-only rule selected such a pair (Jaccard 1.00) and left the
+    # output flat for every word. Only the choice among real MBON neurons
+    # changes; no edge is synthesised.
+    max_readout_overlap: 0.5
   # Restrict the subcircuit to one hemisphere to halve the size. "" disables.
   restrict_side: ""
   # Max path length (in hops) used to verify photoreceptor -> output reachability.
@@ -161,6 +178,9 @@ subcircuit:
     max_sources: 192
     # Synthetic sign of bridge synapses.
     sign: 1
+    # Seed for the per-Kenyon-cell sparse source draw. Recorded in the run
+    # manifest so any run can be reproduced exactly.
+    seed: 20240917
     # Weight applied to bridge synapses before the global calibration scale.
     weight: 1.0
 
@@ -220,7 +240,12 @@ network:
 calibration:
   enabled: true
   # Global multiplier searched over `scale_grid`.
-  scale_grid: [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
+  scale_grid: [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6]
+  # A candidate is rejected unless its strongest edge can drive a postsynaptic
+  # neuron from a single spike, which for this cell means an edge of at least
+  # 6.35 nA (see network.transmission_weight). Without this, the 0.5-15 Hz band
+  # is satisfied by a silent network: the photoreceptor fired at 136 Hz while
+  # the lamina below it reached 0.7 Hz and no downstream stage fired at all.
   # Drive parameters searched jointly with `scale_grid`. An empty list means
   # "use the value from `network` unchanged". These are searched because with
   # the LIF sign convention corrected the network is bistable in `scale_grid`
@@ -258,8 +283,10 @@ encoding:
   # Darkness -> firing rate. rate_hz = baseline_hz + span_hz * darkness.
   baseline_hz: 2.0
   max_hz: 120.0
-  # Gain applied to encoded rates before conversion to current, in nA/Hz.
-  rate_to_current_na: 0.002
+  # Encoded rates are converted to input current by inverting the LIF
+  # rate-current relation for the configured cell (see encoding.rate_to_current),
+  # so no fixed nA/Hz gain is needed. The old scalar gain of 0.002 nA/Hz was
+  # roughly 600x too weak to bring a photoreceptor to threshold.
   # Presentation timing, in ms.
   stimulus_ms: 300.0
   rest_ms: 200.0
