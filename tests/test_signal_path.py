@@ -37,10 +37,10 @@ def driven(subcircuit):
         **{
             "calibration.enabled": "false",
             "network.background_dc_na": "0.0",
-            "network.noise.weight": "0.05",
+            "network.noise.weight": "0.0",
         }
     )
-    built = net.build_network(subcircuit, cfg, weight_scale=0.05)
+    built = net.build_network(subcircuit, cfg, weight_scale=500.0)
     mapping = encoding.make_mapping(cfg, seed=1000)
     runner = learning.TrialRunner(built, cfg, mapping, seed=1000)
     return cfg, built, runner
@@ -96,7 +96,7 @@ def test_background_drive_set_when_noise_disabled(subcircuit):
     threshold during diagnosis.
     """
     cfg = _config(**{"network.noise.enabled": "false", "calibration.enabled": "false"})
-    built = net.build_network(subcircuit, cfg, weight_scale=0.05)
+    built = net.build_network(subcircuit, cfg, weight_scale=500.0)
     for stage in built.stages.values():
         assert float(np.max(stage.group.I_bg[:])) == pytest.approx(
             float(cfg.get("network.background_dc_na"))

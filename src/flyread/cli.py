@@ -101,7 +101,13 @@ def cmd_fetch_data(args, config: Config) -> int:
 def _prepare(config: Config, args, run_id: str | None = None):
     """Seed, load the dataset, verify data, and extract the subcircuit."""
     from .connectome import extract_subcircuit, validate_schema, verify_files
-    from .encoding import load_dataset, make_mapping, verify_font
+    from .encoding import (
+        apply_label_mode,
+        ink_density_map,
+        load_dataset,
+        make_mapping,
+        verify_font,
+    )
 
     seed = int(args.seed if args.seed is not None else config.get("evaluation.base_seed"))
     seed_record = seed_everything(seed)
@@ -117,10 +123,23 @@ def _prepare(config: Config, args, run_id: str | None = None):
     manifest.data["schema"] = schema
     digests = verify_files(config, manifest=manifest)
 
-    dataset = load_dataset(
-        config.get("data.words_csv"), config.get("encoding.categories")
+    dataset = apply_label_mode(
+        load_dataset(config.get("data.words_csv"), config.get("encoding.categories")),
+        config,
+        str(config.get("encoding.label_mode")),
     )
     manifest.data["dataset"] = dataset.summary()
+    manifest.data["label_mode"] = str(config.get("encoding.label_mode"))
+    if str(config.get("encoding.label_mode")) == "ink_quartile":
+        # Record the exact ink value at every label boundary so the learning
+        # target is auditable from the manifest alone.
+        manifest.data["ink_density"] = {
+            word: round(value, 6)
+            for word, value in sorted(
+                ink_density_map(dataset, config).items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        }
     manifest.data["flywire_release"] = config.get("data.release")
     manifest.data["checksums"] = digests
     manifest.encoding["font"] = verify_font(config)

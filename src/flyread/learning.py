@@ -167,12 +167,28 @@ def apply_dopamine(
         stats.trace_max = max(stats.trace_max, float(trace.max()) if trace.size else 0.0)
 
     rate = float(config.get("learning.learning_rate"))
-    w_min = float(config.get("learning.w_min"))
-    w_max = float(config.get("learning.w_max"))
-
     before = plastic.weights.copy()
     delta = rate * float(dopamine) * trace * active
-    updated = np.clip(before + delta, w_min, w_max)
+    # Bounds are relative to the INITIAL synaptic weight, not absolute. The
+    # plastic mushroom_body -> output synapse is initialised to `weight_scale`
+    # (measured 500 in the calibrated operating regime), so absolute bounds of
+    # 0..1 made the very first dopamine update clip the readout drive down by
+    # ~500x and leave the update range far too weak to matter -- a postsynaptic
+    # spike needs a current of about tau_mem/v_threshold, i.e. roughly 333 at
+    # these LIF settings. Learning could therefore only ever destroy the
+    # readout, never shape it. Ratios keep plasticity meaningful at any scale.
+    initial = np.asarray(
+        getattr(plastic, "initial_weights", plastic.weights), dtype=np.float64
+    )
+    if config.get("learning.relative_bounds", True):
+        lo = initial * float(config.get("learning.w_min_ratio", 0.0))
+        hi = initial * float(config.get("learning.w_max_ratio", 2.0))
+        updated = np.clip(before + delta, np.minimum(lo, hi), np.maximum(lo, hi))
+        w_min, w_max = float(lo.min()), float(hi.max())
+    else:
+        w_min = float(config.get("learning.w_min"))
+        w_max = float(config.get("learning.w_max"))
+        updated = np.clip(before + delta, w_min, w_max)
 
     plastic.weights = updated
     plastic.trace = trace
@@ -578,6 +594,13 @@ class TrialRunner:
         syn = self.network.synaptic_groups[plastic.role_pair]
         syn.elig = 0.0
         plastic.trace = np.zeros_like(plastic.trace)
+        # Release probability is a documented per-trial baseline, not carried
+        # over: a synapse left depleted from the previous word would bias the
+        # next word's response toward whatever it was used for.
+        if bool(self.config.get("network.short_term_depression.enabled", True)):
+            for group in self.network.synaptic_groups.values():
+                if "u" in group.variables:
+                    group.u = 1.0
 
     # -- reporting ------------------------------------------------------
     @property

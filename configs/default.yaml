@@ -183,6 +183,26 @@ subcircuit:
     seed: 20240917
     # Weight applied to bridge synapses before the global calibration scale.
     weight: 1.0
+  # SYNTHETIC dense mushroom_body -> output readout.
+  #
+  # Measured gap: the selected subcircuit has only 8 mushroom_body -> output
+  # edges, drawn from 7 distinct Kenyon cells out of 24, so 17 Kenyon cells
+  # have no route to the readout and it is measurably degenerate -- one output
+  # neuron won all 20 held-out words while another fired exactly 71 spikes on
+  # every word regardless of stimulus. As with the lobula bridge, the release
+  # cannot express a visual mushroom-body readout, so this dense seeded set
+  # closes the gap and is flagged synthetic in every manifest.
+  readout:
+    enabled: true
+    # Kenyon cells projecting to each output neuron, drawn without replacement
+    # per output neuron from the selected Kenyon cells.
+    sources_per_output: 12
+    # Synthetic sign of readout synapses.
+    sign: 1
+    # Synapses per source -> output pair.
+    weight: 1.0
+    # Seed for the per-output-neuron source draw.
+    seed: 20240918
 
 network:
   # Number of output neurons. Must equal encoding.n_categories.
@@ -201,6 +221,56 @@ network:
     v_rest: 0.0
     refractory_ms: 2.0
     t_init_ms: 50.0
+  # SYNTHETIC. Each synapse carries a release probability `u` that starts at 1,
+  # is decremented by `use` on every presynaptic spike, and recovers toward 1
+  # with time constant `tau_ms`; the delivered current is w * u. Without it the
+  # network is bistable -- silent below weight_scale ~1, and above ~2 it latches
+  # into a fixed attractor that ignores the input. Measured with it disabled,
+  # all 20 held-out words produced the bit-identical output vector [46,4,32,5].
+  # FlyWire synapse counts carry no short-term plasticity, so this is declared
+  # as synthetic and recorded in every run manifest rather than presented as
+  # measured wiring.
+  short_term_depression:
+    # Implemented and available, but OFF by default because it measurably HURTS
+    # the thing it was added to fix: with it on, lamina word-discrimination fell
+    # from 8-9 distinct response patterns to 1-3. The bistability it was meant
+    # to break is instead handled by the per-pair weight ratios above.
+    enabled: false
+    tau_ms: 50.0
+    use: 0.3
+    floor: 0.15
+  # SYNTHETIC. Multiplier applied to `weight_scale` for the artificial
+  # lobula -> mushroom_body bridge only. The bridge is not measured wiring, so
+  # its strength is a declared free parameter. It is decoupled from the visual
+  # chain because the chain needs a far larger `weight_scale` than the bridge
+  # tolerates: at a shared scale the bridge saturates the mushroom body
+  # (~3471 spikes per 300 ms word), which drives `reinforcement` hard, and the
+  # 7-of-8 inhibitory reinforcement -> output edges then clamp the readout
+  # completely silent.
+  artificial_bridge:
+    weight_ratio: 0.001
+  # SYNTHETIC, same class of gap as `subcircuit.bridge` above: the selected
+  # subcircuit has only 8 mushroom_body -> output edges drawing on 7 distinct
+  # Kenyon cells out of 24, so 17 Kenyon cells have no path to the readout and
+  # the measured readout is degenerate (one output neuron won all 20 held-out
+  # words; another fired exactly 71 spikes on every word). Declared separately
+  # because it tunes a different pair than the lobula bridge.
+  artificial_readout:
+    weight_ratio: 0.3
+  # A 46-synapse EXCITATORY self-connection inside the output stage latches
+  # the readout: output neurons 0 and 2 measured ~122 spikes per 300 ms word
+  # with sd 0.0-0.5, insensitive both to the stimulus and to a 20x reduction in
+  # readout drive, so one of them won all 20 held-out words. A self-exciting
+  # measurement device cannot report its own input.
+  output_recurrent:
+    weight_ratio: 0.0
+  # Measured runaway: all 116 mushroom_body -> mushroom_body edges are
+  # excitatory, and the compartment saturates at ~3500 spikes per 300 ms word
+  # at every `weight_scale` tried, independent of the bridge strength. A
+  # self-exciting compartment that runs away carries no information about its
+  # input, so its drive is a declared free parameter.
+  mushroom_body_recurrent:
+    weight_ratio: 0.001
   # Photoreceptor drive current per unit firing rate, in nA.
   input_gain_na: 0.002
   # Baseline input current for photoreceptors, in nA.
@@ -226,7 +296,7 @@ network:
   # and NO weight scale can reach the calibration band. Normalising by each
   # pair's mean synapse count makes `weight_scale` mean the same thing
   # everywhere, so loop gain follows edge counts instead of synapse counts.
-  pair_weight_normalisation: mean_synapses
+  pair_weight_normalisation: fan_in_total
   # Reward signal injected into the real reinforcement stage. The reward VALUE
   # is synthetic; the neurons receiving it (APL/DPM) and their real synapses
   # onto Kenyon cells are genuine FlyWire neurons and connections.
@@ -240,7 +310,7 @@ network:
 calibration:
   enabled: true
   # Global multiplier searched over `scale_grid`.
-  scale_grid: [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6]
+  scale_grid: [10.0, 25.0, 50.0, 100.0, 200.0, 350.0, 500.0, 700.0, 1000.0, 1500.0]
   # A candidate is rejected unless its strongest edge can drive a postsynaptic
   # neuron from a single spike, which for this cell means an edge of at least
   # 6.35 nA (see network.transmission_weight). Without this, the 0.5-15 Hz band
@@ -254,7 +324,7 @@ calibration:
   # Without them no scale lands in the 0.5-15 Hz band, because the transition
   # from fully silent to saturated happens inside one grid step.
   background_dc_grid: [0.0, 0.1, 0.25, 0.5]
-  noise_weight_grid: [0.05, 0.15, 0.3, 0.6]
+  noise_weight_grid: [0.0, 0.01, 0.05, 0.15, 0.3]
   simulated_ms: 300.0
   # Settling time excluded from the measurement, in ms.
   settle_ms: 50.0
@@ -280,8 +350,30 @@ encoding:
   font_size_px: 64
   letter_spacing_px: 8
   image_size_px: [128, 128]
+  # Learning target.
+  #
+  # `category` is the original semantic axis (animal / food / tool / place) and
+  # was MEASURED TO BE UNLEARNABLE from rendered words: supervised logistic
+  # regression on 60 training words scored 0.20-0.35 on 20 held-out words
+  # (chance 0.25) at 6x6, 16x16 and 32x32, and nearest-centroid scored 0.100.
+  # Words in a category are no more visually alike than words across
+  # categories, so the structure is absent from the stimulus itself.
+  #
+  # `ink_quartile` labels each word by total ink (label 0 lightest quarter,
+  # label 3 darkest). It is a global property, so it requires spatial
+  # integration rather than reading one photoreceptor, and the same regression
+  # scores 0.50-0.70 held-out at every resolution tried.
+  label_mode: ink_quartile
   # Darkness -> firing rate. rate_hz = baseline_hz + span_hz * darkness.
-  baseline_hz: 2.0
+  #
+  # baseline_hz MUST be 0: any positive baseline rate is converted to a current
+  # by inverting the LIF rate-current relation, and 2 Hz maps to exactly the
+  # threshold current (50 nA, since v_inf = I*tau_mem = 1.0 = v_threshold).
+  # Every blank pixel therefore sat precisely at threshold and the retina
+  # responded almost identically to every word (329-334 spikes, between-word
+  # std ~1). With baseline_hz = 0 a blank pixel is silent and the same words
+  # produce 160-198 spikes across 15 distinct totals.
+  baseline_hz: 0.0
   max_hz: 120.0
   # Encoded rates are converted to input current by inverting the LIF
   # rate-current relation for the configured cell (see encoding.rate_to_current),
@@ -310,6 +402,15 @@ learning:
   punishment: -1.0
   w_min: 0.0
   w_max: 1.0
+  # Bounds are applied as RATIOS of the initial plastic weight, not as
+  # absolute values. The plastic mushroom_body -> output synapse is initialised
+  # to `weight_scale` (measured 500 in the calibrated operating regime), so
+  # absolute bounds of 0..1 clipped the readout drive down ~500x on the first
+  # dopamine update and left the range far too weak to matter. Set
+  # `relative_bounds: false` to use w_min/w_max above instead.
+  relative_bounds: true
+  w_min_ratio: 0.0
+  w_max_ratio: 2.0
   # Only these pathways are plastic.
   plastic_roles: [mushroom_body_output]
   # Synapse-level weight noise, dimensionless.

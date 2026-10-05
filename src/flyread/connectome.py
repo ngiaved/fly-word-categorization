@@ -143,6 +143,7 @@ class Subcircuit:
     reachability: dict[str, Any] = field(default_factory=dict)
     # Provenance of the synthetic lobula -> Kenyon cell bridge, if enabled.
     reachability_bridge: dict[str, Any] = field(default_factory=dict)
+    reachability_readout: dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_neurons(self) -> int:
@@ -191,6 +192,7 @@ class Subcircuit:
             "dropped_edges": self.stats.as_dict(),
             "reachability": self.reachability,
             "artificial_bridge": self.reachability_bridge,
+            "artificial_readout": self.reachability_readout,
         }
 
 
@@ -1148,6 +1150,82 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
                 "artificial bridge lobula->Kenyon cells: %s",
                 {k: v for k, v in bridge_info.items() if k != "note"},
             )
+    # ------------------------------------------------------------------
+    # ARTIFICIAL READOUT: Kenyon cell -> output neuron.
+    #
+    # Measured on release 783: the selected subcircuit contains only 8
+    # mushroom_body -> output edges, drawing on 7 distinct Kenyon cells out of
+    # 24. Seventeen Kenyon cells have no path to the readout at all, and the
+    # measured consequence is a degenerate readout: one output neuron won all
+    # 20 held-out words while another fired exactly 71 spikes on every word
+    # regardless of stimulus. This is the same class of gap as the
+    # lobula -> Kenyon-cell bridge -- the release cannot express a visual
+    # mushroom-body readout -- so one synthetic, dense, seeded synapse set
+    # closes it. Synapse counts and signs are invented; every edge is flagged
+    # `artificial` and the wiring is recorded in the manifest.
+    #
+    # These edges join the same role pair as the measured ones, so they are the
+    # same plastic set: dopamine can shape the real edges and the synthetic
+    # ones together.
+    # ------------------------------------------------------------------
+    readout_info: dict[str, Any] = {
+        "enabled": bool(config.get("subcircuit.readout.enabled"))
+    }
+    if config.get("subcircuit.readout.enabled"):
+        kc_roots = [r for r in selected.get("mushroom_body", []) if r in index]
+        out_roots = [r for r in selected.get("output", []) if r in index]
+        if not kc_roots or not out_roots:
+            readout_info["skipped"] = "no Kenyon cell sources or no output targets"
+        else:
+            per_output = int(config.get("subcircuit.readout.sources_per_output"))
+            per_output = max(1, min(per_output, len(kc_roots)))
+            sign = int(config.get("subcircuit.readout.sign"))
+            n_syn = int(config.get("subcircuit.readout.weight"))
+            seed = int(config.get("subcircuit.readout.seed", 20240918))
+            rng = np.random.default_rng(seed)
+            patterns: set[tuple[int, ...]] = set()
+            for target in sorted(out_roots):
+                picked = sorted(
+                    kc_roots[p]
+                    for p in rng.choice(len(kc_roots), size=per_output, replace=False)
+                )
+                patterns.add(tuple(picked))
+                for source in picked:
+                    internal_edges.append(
+                        (
+                            index[source],
+                            index[target],
+                            n_syn,
+                            sign,
+                            "mushroom_body->output",
+                            True,
+                        )
+                    )
+            readout_info.update({
+                "role_pair": "mushroom_body->output",
+                "n_sources": len(kc_roots),
+                "n_targets": len(out_roots),
+                "sources_per_output": per_output,
+                "sign": sign,
+                "synapses_per_pair": n_syn,
+                "n_edges": len(out_roots) * per_output,
+                "n_synapses": len(out_roots) * per_output * n_syn,
+                "seed": seed,
+                "distinct_source_sets": len(patterns),
+                "source_rule": (
+                    "seeded random subset of selected Kenyon cells, drawn "
+                    "independently per output neuron"
+                ),
+                "real_edges_retained": sum(
+                    1 for e in internal_edges
+                    if e[4] == "mushroom_body->output" and not e[5]
+                ),
+            })
+        LOGGER.info(
+            "artificial readout Kenyon cells->output neurons: %s",
+            {k: v for k, v in readout_info.items() if k != "note"},
+        )
+
     subcircuit = Subcircuit(
         neurons=[neurons[r] for r in deduped],
         index=index,
@@ -1158,8 +1236,10 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
         rules={stage["name"]: stage["rules"] for stage in stages},
     )
     subcircuit.reachability_bridge = bridge_info
+    subcircuit.reachability_readout = readout_info
     if manifest is not None:
         manifest.subcircuit["artificial_bridge"] = bridge_info
+        manifest.subcircuit["artificial_readout"] = readout_info
     subcircuit.reachability = _check_reachability(
         subcircuit, max_hops=int(config.get("subcircuit.max_path_hops")),
         output_rule=output_rule,

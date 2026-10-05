@@ -62,6 +62,10 @@ class PlasticSynapses:
     post_indices: np.ndarray
     role_pair: str
     weights: np.ndarray
+    # Weights the plastic set was initialised to. Dopamine bounds are relative
+    # to these, because the initial magnitude is `weight_scale` and therefore
+    # tracks the calibration scale rather than sitting near 1.
+    initial_weights: np.ndarray
     trace: np.ndarray
     # Synapses disabled by pruning or silencing, excluded from the update.
     active: np.ndarray
@@ -141,6 +145,22 @@ class SimulationNetwork:
                 key: self.config.get(f"network.lif.{key}")
                 for key in ("tau_ms", "tau_syn_ms", "v_threshold", "v_reset",
                             "v_rest", "refractory_ms", "t_init_ms")
+            },
+            "short_term_depression": {
+                "synthetic": True,
+                "enabled": bool(
+                    self.config.get("network.short_term_depression.enabled", True)
+                ),
+                "tau_ms": self.config.get("network.short_term_depression.tau_ms"),
+                "use": self.config.get("network.short_term_depression.use"),
+                "floor": self.config.get(
+                    "network.short_term_depression.floor"
+                ),
+                "note": (
+                    "FlyWire synapse counts carry no short-term plasticity; "
+                    "this is a synthetic addition to prevent the network "
+                    "latching into a fixed attractor."
+                ),
             },
         }
 
@@ -287,6 +307,21 @@ def build_network(
     w_min = float(config.get("learning.w_min"))
     w_max = float(config.get("learning.w_max"))
 
+    # Short-term depression. Without it the network is bistable: measured on
+    # this release it is silent below weight_scale ~1, and above ~2 it latches
+    # into a fixed attractor. Presenting all 20 held-out words at scale 2
+    # returned the bit-identical output vector [46, 4, 32, 5] every time,
+    # because sustained drive kept every synapse fully available and the
+    # network ignored the input pattern. A per-synapse resource that is spent
+    # on use and recovers with time limits sustained drive, so responses stay
+    # graded in the input. This is SYNTHETIC: FlyWire synapse counts carry no
+    # short-term plasticity, so it is declared here and recorded in the
+    # manifest rather than presented as measured wiring.
+    std_enabled = bool(config.get("network.short_term_depression.enabled", True))
+    std_tau = float(config.get("network.short_term_depression.tau_ms", 50.0))
+    std_use = float(config.get("network.short_term_depression.use", 0.3))
+    std_floor = float(config.get("network.short_term_depression.floor", 0.15))
+
     for (pre_stage, post_stage), rows in sorted(by_pair.items()):
         if (pre_stage, post_stage) not in adjacent:
             # Long-range or skip connections are not simulated; they are
@@ -304,18 +339,36 @@ def build_network(
             # coincident pre/post activity and decays exponentially.
             model = (
                 "w : 1\n"
-                "delig/dt = -elig/trace_tau : 1 (clock-driven)"
+                "delig/dt = -elig/trace_tau : 1 (clock-driven)\n"
+                "du/dt = (u_rest - u)/tau_u : 1 (clock-driven)"
             )
-            on_pre = "I_syn += w\nelig += trace_inc"
+            on_pre = "I_syn += w * u\nelig += trace_inc\nu -= use"
             on_post = "elig += trace_inc"
             ns = dict(namespace)
             ns["trace_tau"] = trace_tau * b2.ms
             ns["trace_inc"] = trace_increment
             ns["w_min"] = w_min
             ns["w_max"] = w_max
+            ns["tau_u"] = max(std_tau, 1.0) * b2.ms
+            ns["u_rest"] = 1.0
+            ns["use"] = std_use
             syn = b2.Synapses(
                 groups[pre_stage], groups[post_stage], model=model,
                 on_pre=on_pre, on_post=on_post, method="euler", namespace=ns,
+            )
+        elif std_enabled:
+            model = (
+                "w : 1\n"
+                "du/dt = (u_rest - u)/tau_u : 1 (clock-driven)"
+            )
+            ns = dict(namespace)
+            ns["tau_u"] = max(std_tau, 1.0) * b2.ms
+            ns["u_rest"] = 1.0
+            ns["use"] = std_use
+            syn = b2.Synapses(
+                groups[pre_stage], groups[post_stage], model=model,
+                on_pre="I_syn += w * u\nu -= use",
+                method="euler", namespace=ns,
             )
         else:
             syn = b2.Synapses(
@@ -349,18 +402,90 @@ def build_network(
         normalisation_mode = str(
             config.get("network.pair_weight_normalisation", "fan_in")
         )
-        if normalisation_mode == "fan_in" and len(n_syn):
-            magnitude = float(weight_scale) / n_syn
+        # The artificial lobula -> mushroom_body bridge is synthetic, so its
+        # strength is a declared free parameter rather than measured wiring. It
+        # is exposed separately because the visual chain needs a much larger
+        # `weight_scale` than the bridge can tolerate: at a shared scale the
+        # bridge saturates the mushroom body (3471 spikes over 300 ms), which
+        # drives `reinforcement` hard, and the 7-of-8 inhibitory
+        # reinforcement -> output edges then clamp the readout fully silent.
+        bridge_ratio = float(
+            config.get("network.artificial_bridge.weight_ratio", 1.0)
+        )
+        mb_recurrent_ratio = float(
+            config.get("network.mushroom_body_recurrent.weight_ratio", 1.0)
+        )
+        readout_ratio = float(
+            config.get("network.artificial_readout.weight_ratio", 1.0)
+        )
+        output_recurrent_ratio = float(
+            config.get("network.output_recurrent.weight_ratio", 1.0)
+        )
+        if (pre_stage, post_stage) == ("lobula", "mushroom_body"):
+            pair_scale = float(weight_scale) * bridge_ratio
+        elif (pre_stage, post_stage) == ("mushroom_body", "mushroom_body"):
+            # The 116 mushroom_body -> mushroom_body edges are all excitatory
+            # and measured to saturate the compartment (~3500 spikes per 300 ms
+            # word) at every scale tried, independent of the bridge strength.
+            # A self-exciting compartment that runs away carries no information
+            # about its input, so its drive is exposed separately.
+            pair_scale = float(weight_scale) * mb_recurrent_ratio
+        elif (pre_stage, post_stage) == ("mushroom_body", "output"):
+            # Dense synthetic readout: many Kenyon-cell inputs per output
+            # neuron, so this pair needs its own scale to avoid saturating.
+            pair_scale = float(weight_scale) * readout_ratio
+        elif (pre_stage, post_stage) == ("output", "output"):
+            # A 46-synapse EXCITATORY self-connection inside the output stage
+            # latches the readout: output neurons 0 and 2 sat at ~122 spikes
+            # per 300 ms word with sd 0.0-0.5, insensitive to the stimulus and
+            # to a 20x reduction in readout drive, so one of them won all 20
+            # held-out words. A self-exciting measurement device cannot report
+            # its input, so its recurrence is a declared free parameter.
+            pair_scale = float(weight_scale) * output_recurrent_ratio
+        else:
+            pair_scale = float(weight_scale)
+        if normalisation_mode == "fan_in_total":
+            # Normalise by the TOTAL incoming synapse weight of each
+            # postsynaptic neuron, not per synapse.
+            #
+            # `fan_in` divides each edge weight by its own synapse count, which
+            # equalises the current delivered by ONE presynaptic spike but not
+            # the total a postsynaptic neuron receives. That total scales with
+            # the neuron's number of inputs, and fan-in varies by orders of
+            # magnitude across this subcircuit (a mushroom-body ->
+            # reinforcement neuron has 48 inputs; a photoreceptor ->
+            # lamina edge has a handful). At the calibrated weight scale this
+            # diverges outright: reinforcement neuron 0 was measured running to
+            # v = -3.0e19 while its siblings sat pinned at v = 9.1, and the
+            # teacher current could not make them spike at any gain.
+            #
+            # Dividing by the per-neuron incoming total instead makes the drive
+            # delivered to every postsynaptic neuron independent of how many
+            # inputs it happens to have, so one weight_scale means the same
+            # physical current at every stage. Presynaptic rates still matter,
+            # which is what keeps the visual chain word-dependent.
+            incoming = np.bincount(
+                post_indices, weights=n_syn,
+                minlength=int(post_indices.max()) + 1 if len(post_indices) else 1,
+            )
+            magnitude = pair_scale / np.maximum(incoming[post_indices], 1.0)
+        elif normalisation_mode == "fan_in" and len(n_syn):
+            magnitude = pair_scale / n_syn
         elif normalisation_mode == "mean_synapses" and len(n_syn):
             mean_syn = float(n_syn.mean())
             if mean_syn > 0.0:
-                magnitude = n_syn / mean_syn * float(weight_scale)
+                magnitude = n_syn / mean_syn * pair_scale
             else:
-                magnitude = n_syn * float(weight_scale)
+                magnitude = n_syn * pair_scale
         else:
-            magnitude = float(weight_scale) * np.ones_like(n_syn)
+            magnitude = pair_scale * np.ones_like(n_syn)
         weight = sign * magnitude
         syn.w = weight.tolist()
+        if std_enabled:
+            # ``u`` is a dimensionless release probability starting fully
+            # available; ``floor`` stops a heavily used synapse from becoming
+            # permanently silent.
+            syn.u = 1.0
         if is_plastic:
             syn.elig = 0.0
         synaptic_groups[role_pair] = syn
@@ -377,6 +502,7 @@ def build_network(
                 post_indices=post_indices,
                 role_pair=role_pair,
                 weights=magnitude.copy(),
+                initial_weights=magnitude.copy(),
                 trace=np.zeros(len(weight)),
                 active=np.ones(len(weight), dtype=bool),
                 n_synapses_each=n_syn.astype(np.int64),

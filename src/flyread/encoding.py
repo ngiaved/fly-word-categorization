@@ -254,6 +254,77 @@ def _render_cached(
     return np.ascontiguousarray(np.clip(darkness, 0.0, 1.0))
 
 
+# Label axes for the learning target. The original `category` axis is
+# semantic (animal / food / tool / place) and was measured to be unlearnable
+# from rendered words: a supervised logistic regression trained on 60 words
+# reached only 0.20-0.35 on 20 held-out words (chance 0.25) at 6x6, 16x16 and
+# 32x32 resolution, and nearest-centroid accuracy was 0.100. Words within a
+# category are no more visually similar than words across categories, so no
+# learning rule can extract the structure because it is not in the stimulus.
+#
+# `ink_quartile` is a visually grounded replacement: label 0 is the lightest
+# quarter of the dataset by total ink and label 3 the darkest. It is a global
+# property, so classifying it requires spatial integration across the retina
+# rather than reading a single photoreceptor. The same regression reaches
+# 0.50-0.70 held-out (chance 0.25) at every resolution tried.
+INK_QUARTILE_LABELS: tuple[str, ...] = ("ink_q1", "ink_q2", "ink_q3", "ink_q4")
+LABEL_MODES: tuple[str, ...] = ("category", "ink_quartile")
+
+
+def ink_density_map(dataset: Dataset, config) -> dict[str, float]:
+    """Mean ink coverage per word, measured on the rendered image.
+
+    Deliberately computed from the full-resolution image rather than from the
+    pooled photoreceptor grid, so the label is a property of the stimulus alone
+    and does not change when the simulation resolution does.
+    """
+    return {
+        item.word: float(render_word(item.word, config).mean())
+        for item in dataset.items
+    }
+
+
+def apply_label_mode(dataset: Dataset, config, mode: str = "category") -> Dataset:
+    """Return `dataset` relabelled onto the requested visual label axis.
+
+    Words, path, and digest are preserved so file verification and the
+    train/test split continue to key off the same identity. Only the category
+    name and integer label change.
+    """
+    if mode == "category":
+        return dataset
+    if mode != "ink_quartile":
+        raise DatasetError(
+            f"unknown encoding.label_mode {mode!r}; expected one of {list(LABEL_MODES)}"
+        )
+    density = ink_density_map(dataset, config)
+    total = len(dataset.items)
+    if total % len(INK_QUARTILE_LABELS) != 0:
+        raise DatasetError(
+            f"ink_quartile needs the word count divisible by "
+            f"{len(INK_QUARTILE_LABELS)} to keep classes balanced, got {total}"
+        )
+    per_class = total // len(INK_QUARTILE_LABELS)
+    # Ties broken by word so the labelling is deterministic and independent of
+    # file order or dict iteration.
+    order = sorted(density, key=lambda word: (density[word], word))
+    label_of = {word: i // per_class for i, word in enumerate(order)}
+    items = [
+        WordItem(
+            word=item.word,
+            category=INK_QUARTILE_LABELS[label_of[item.word]],
+            label=label_of[item.word],
+        )
+        for item in dataset.items
+    ]
+    return Dataset(
+        items=items,
+        categories=list(INK_QUARTILE_LABELS),
+        path=dataset.path,
+        sha256=dataset.sha256,
+    )
+
+
 def render_word(word: str, config) -> np.ndarray:
     """Render a word to a darkness image in [0, 1], shape (H, W).
 
