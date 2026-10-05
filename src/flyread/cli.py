@@ -101,7 +101,7 @@ def cmd_fetch_data(args, config: Config) -> int:
 def _prepare(config: Config, args, run_id: str | None = None):
     """Seed, load the dataset, verify data, and extract the subcircuit."""
     from .connectome import extract_subcircuit, validate_schema, verify_files
-    from .encoding import load_dataset, verify_font
+    from .encoding import load_dataset, make_mapping, verify_font
 
     seed = int(args.seed if args.seed is not None else config.get("evaluation.base_seed"))
     seed_record = seed_everything(seed)
@@ -124,6 +124,20 @@ def _prepare(config: Config, args, run_id: str | None = None):
     manifest.data["flywire_release"] = config.get("data.release")
     manifest.data["checksums"] = digests
     manifest.encoding["font"] = verify_font(config)
+    # The mapping scheme id (and, for the shuffled-pixel control, the
+    # permutation seed) must be in every run manifest per the visual-encoding
+    # spec, because the encoding is what defines the input to the network.
+    manifest.encoding["mapping"] = make_mapping(config, seed=seed).describe()
+    manifest.encoding["timing"] = {
+        "stimulus_ms": float(config.get("encoding.stimulus_ms")),
+        "rest_ms": float(config.get("encoding.rest_ms")),
+        "dt_ms": float(config.get("simulation.dt")),
+    }
+    manifest.encoding["rate_to_current_na"] = float(
+        config.get("encoding.rate_to_current_na")
+    )
+    manifest.encoding["baseline_hz"] = float(config.get("encoding.baseline_hz"))
+    manifest.encoding["max_hz"] = float(config.get("encoding.max_hz"))
 
     subcircuit = extract_subcircuit(config, manifest=manifest)
     manifest.subcircuit = subcircuit.summary()
@@ -239,7 +253,7 @@ def cmd_train(args, config: Config) -> int:
     condition = args.condition
     result = run_condition(
         condition, dataset, split, seed, config,
-        calibration.weight_scale, subcircuit,
+        calibration.weight_scale, subcircuit, manifest=manifest,
     )
     manifest.metrics = {"condition": condition, **result.as_dict(include_records=True)}
     manifest.write(run_dir)
@@ -298,7 +312,8 @@ def cmd_evaluate(args, config: Config) -> int:
         for condition in conditions:
             LOGGER.info("[%d/%d] seed %d condition %s", index, n_seeds, run_seed, condition)
             per_condition[condition] = run_condition(
-                condition, dataset, split, run_seed, config, weight_scale, subcircuit
+                condition, dataset, split, run_seed, config, weight_scale, subcircuit,
+                manifest=manifest,
             )
         from .evaluate import SeedResult
 
@@ -401,7 +416,8 @@ def cmd_selftest(args, config: Config) -> int:
     results = {}
     for condition in ("trained", "structural_on", "structural_off"):
         results[condition] = run_condition(
-            condition, dataset, split, seed, config, scale, subcircuit
+            condition, dataset, split, seed, config, scale, subcircuit,
+            manifest=manifest,
         )
     seed_result = SeedResult(seed=seed, results=results, weight_scale=scale,
                              seconds=0.0)

@@ -365,6 +365,11 @@ def run_condition(
     run_config, settings = condition_config(config, condition)
     network = build_network(subcircuit, run_config, weight_scale=weight_scale)
     mapping = make_mapping(run_config, seed=seed)
+    if manifest is not None:
+        # Per-condition encoding record: conditions can override the grid or
+        # enable the shuffled-pixel control, so the base manifest entry is not
+        # sufficient on its own.
+        manifest.encoding.setdefault("conditions", {})[condition] = mapping.describe()
     structural = StructuralPlasticity(network, run_config, seed=seed)
     structural.set_trial_duration(
         float(run_config.get("encoding.stimulus_ms")) * 1e-3
