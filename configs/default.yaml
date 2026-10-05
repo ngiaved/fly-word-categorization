@@ -91,7 +91,11 @@ subcircuit:
       cap: 576
     - name: lamina
       rules:
-        - {column: cell_class, equals: "LA>ME"}
+        # `LA>ME` (8035 neurons) alone leaves the chain badly
+        # under-connected: only 9 `visual` neurons send anything to it.
+        # `ME>LA` (4979 neurons) is the other medulla-to-lamina
+        # projection; both are genuine lamina cell types.
+        - {column: cell_class, in: ["LA>ME", "ME>LA"]}
       cap: 384
     - name: medulla
       rules:
@@ -99,7 +103,11 @@ subcircuit:
       cap: 384
     - name: lobula
       rules:
-        - {column: cell_class, in: ["LO", "LO>LOP", "LOP"]}
+        # Every LO* class, not three exact ones: restricting to
+        # LO / LO>LOP / LOP left medulla -> lobula with ZERO connected
+        # candidates. The broader rule matches the 149195 medulla ->
+        # lobula synapses present in the annotation.
+        - {column: cell_class, startswith: "LO"}
       cap: 192
     # Real reinforcement/peduncle neurons: 2x APL (GABA) and 2x DPM
     # (dopamine) in release 783. These supply the teaching signal. Placed
@@ -288,6 +296,15 @@ network:
   # Keep it below v_threshold: spontaneous activity should arise from real
   # recurrent connectivity, not from injected noise.
   background_dc_na: 0.2
+  # Generic per-stage-pair gain, keyed "<pre>><post>", applied on top of any
+  # special-cased pair above. The measured optic-lobe pairs cannot share one
+  # scale: photoreceptor->lamina saturates at the refractory limit and destroys
+  # label information that is still decodable at the photoreceptor.
+  pair_gain:
+    photoreceptor>lamina: 1.0
+    lamina>lamina: 1.0
+    medulla>medulla: 1.0
+    lobula>lobula: 1.0
   # How raw synapse counts become synaptic weights. Raw counts are not
   # comparable across stage pairs: mushroom_body -> reinforcement averages 29
   # synapses per edge, reinforcement -> mushroom_body averages 0.5, so that

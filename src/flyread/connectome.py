@@ -606,6 +606,105 @@ def _outgoing_strength(
     return totals
 
 
+def _outgoing_degree(
+    ids: set[int],
+    downstream: set[int],
+    edges_pre: np.ndarray,
+    edges_post: np.ndarray,
+) -> dict[int, int]:
+    """Number of DISTINCT downstream neurons each id projects to.
+
+    ``_outgoing_strength`` counts synapses, which is the wrong objective when
+    seeding a connected chain: a few neurons can send a very large synapse
+    count to one partner, which wins a strength ranking while reaching almost
+    nothing else. Growing a chain that is actually wired together needs
+    COVERAGE, so the seed is ranked by how many distinct neurons it can drive.
+    """
+    if not downstream:
+        return {}
+    mask = np.isin(edges_pre, list(ids)) & np.isin(edges_post, list(downstream))
+    if not mask.any():
+        return {}
+    pairs = np.unique(
+        np.stack([edges_pre[mask], edges_post[mask]], axis=1), axis=0
+    )
+    totals: dict[int, int] = defaultdict(int)
+    for pre in pairs[:, 0].tolist():
+        totals[int(pre)] += 1
+    return totals
+
+
+def _grow_connected_chain(
+    candidates: dict[str, list[int]],
+    chain: Sequence[str],
+    caps: dict[str, int],
+    edges_pre: np.ndarray,
+    edges_post: np.ndarray,
+    edges_n: np.ndarray,
+) -> tuple[dict[str, list[int]], dict[str, str], dict[str, bool]]:
+    """Select each stage of ``chain`` so every link is really connected.
+
+    The chain is grown FORWARD from a seed, and every later stage is drawn only
+    from candidates that receive real edges from the already-committed
+    upstream stage. Ranking each link independently does not work: measured on
+    release 783, seeding the lobula by its predecessor's candidate pool and the
+    medulla by what it sends to that lobula left the lobula with
+    ``driven_candidates: 0``, i.e. no real input at all, and the artificial
+    lobula -> Kenyon-cell bridge then hid the break by making the manifest
+    report ``signal_reaches_outputs: true``.
+
+    Returns the selections, a human-readable rule per stage, and the set of
+    links that could not be connected.
+    """
+    preselected: dict[str, list[int]] = {}
+    detail: dict[str, str] = {}
+    breaks: dict[str, bool] = {}
+    if len(chain) < 2:
+        return preselected, detail, breaks
+
+    first = chain[0]
+    pool0 = list(candidates.get(first) or [])
+    if not pool0:
+        return preselected, detail, breaks
+    next_pool = set(candidates.get(chain[1]) or [])
+    cover = _outgoing_degree(set(pool0), next_pool, edges_pre, edges_post)
+    cap0 = caps.get(first, len(pool0))
+    reaching = sum(1 for r in pool0 if cover.get(r, 0) > 0)
+    preselected[first] = sorted(pool0, key=lambda r: (-cover.get(r, 0), r))[:cap0]
+    detail[first] = (
+        f"chain seed: top {cap0} of {len(pool0)} candidates by number of distinct "
+        f"{chain[1]} neurons reached; {reaching}/{len(pool0)} candidates reach any"
+    )
+
+    committed = set(preselected[first])
+    for position in range(1, len(chain)):
+        name = chain[position]
+        previous = chain[position - 1]
+        pool = list(candidates.get(name) or [])
+        cap = caps.get(name, len(pool))
+        if not pool:
+            continue
+        incoming = _incoming_strength(
+            set(pool), committed, edges_pre, edges_post, edges_n
+        )
+        driven = [r for r in pool if incoming.get(r, 0) > 0]
+        if driven:
+            preselected[name] = sorted(driven, key=lambda r: (-incoming[r], r))[:cap]
+            detail[name] = (
+                f"chain grow: {len(driven)}/{len(pool)} candidates receive from the "
+                f"selected {previous}; top {cap} by synapses received"
+            )
+        else:
+            preselected[name] = sorted(pool, key=lambda r: r)[:cap]
+            detail[name] = (
+                f"CHAIN BREAK: no {name} candidate receives from the selected "
+                f"{previous}; fell back to ascending root_id"
+            )
+            breaks[f"{previous}>{name}"] = True
+        committed = set(preselected[name])
+    return preselected, detail, breaks
+
+
 def read_stages(config) -> list[dict[str, Any]]:
     """Ordered stage definitions from configuration, validated."""
     stages = config.sequence("subcircuit.stages")
@@ -759,48 +858,13 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
     seed_rule_detail: dict[str, str] = {}
     if len(backward_chain) >= 2:
         caps = {s["name"]: int(s["cap"]) for s in stages}
-        order = [s["name"] for s in stages]
-        last = backward_chain[-1]
-        prev = order[order.index(last) - 1] if order.index(last) > 0 else ""
-        last_pool = list(candidates.get(last) or [])
-        prev_pool = set(candidates.get(prev) or [])
-        if last_pool and prev_pool:
-            strength = _incoming_strength(
-                set(last_pool), prev_pool, edges_pre, edges_post, edges_n
-            )
-            preselected[last] = sorted(
-                last_pool, key=lambda r: (-strength.get(r, 0), r)
-            )[:caps.get(last, len(last_pool))]
-            seed_rule_detail[last] = (
-                f"backward seed: top {caps.get(last)} candidates by synapses "
-                f"received from the {prev} CANDIDATE pool"
-            )
-            LOGGER.info(
-                "backward seed %s: %d/%d candidates receive from the %s pool",
-                last, sum(1 for r in last_pool if strength.get(r, 0) > 0),
-                len(last_pool), prev,
-            )
-        for position in range(len(backward_chain) - 2, -1, -1):
-            name = backward_chain[position]
-            downstream = backward_chain[position + 1]
-            pool = list(candidates.get(name) or [])
-            target = set(preselected.get(downstream) or [])
-            if not pool or not target:
-                continue
-            outgoing = _outgoing_strength(
-                set(pool), target, edges_pre, edges_post, edges_n
-            )
-            preselected[name] = sorted(
-                pool, key=lambda r: (-outgoing.get(r, 0), r)
-            )[:caps.get(name, len(pool))]
-            seed_rule_detail[name] = (
-                f"backward seed: top {caps.get(name)} candidates by synapses sent "
-                f"to the seeded {downstream}"
-            )
-            LOGGER.info(
-                "backward seed %s: %d/%d candidates project to the seeded %s",
-                name, sum(1 for r in pool if outgoing.get(r, 0) > 0),
-                len(pool), downstream,
+        preselected, seed_rule_detail, chain_breaks = _grow_connected_chain(
+            candidates, backward_chain, caps, edges_pre, edges_post, edges_n
+        )
+        for broken_link in chain_breaks:
+            LOGGER.warning(
+                "subcircuit selection could not connect %s; the stage after it "
+                "has no real input", broken_link,
             )
 
     for stage in stages:

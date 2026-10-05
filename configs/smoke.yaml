@@ -18,16 +18,25 @@ subcircuit:
         - {column: cell_type, equals: R1-6}
       cap: 36
     - name: lamina
+      # `LA>ME` (8035 neurons) alone leaves the chain badly under-connected:
+      # only 9 `visual` neurons send anything to it. `ME>LA` (4979 neurons) is
+      # the other medulla-to-lamina projection and is included so a connected
+      # chain can actually be grown. Both are genuine lamina cell types.
       rules:
-        - {column: cell_class, equals: "LA>ME"}
+        - {column: cell_class, in: ["LA>ME", "ME>LA"]}
       cap: 24
     - name: medulla
       rules:
         - {column: cell_class, equals: "ME"}
       cap: 24
     - name: lobula
+      # Every LO* class, not just three exact ones. Restricting to
+      # LO / LO>LOP / LOP left the medulla -> lobula link with ZERO connected
+      # candidates, so the lobula had no real visual input at all and the
+      # synthetic bridge silently covered for it. The broader rule matches the
+      # 149195 medulla -> lobula synapses present in the annotation.
       rules:
-        - {column: cell_class, in: ["LO", "LO>LOP", "LOP"]}
+        - {column: cell_class, startswith: "LO"}
       cap: 12
     - name: reinforcement
       rules:

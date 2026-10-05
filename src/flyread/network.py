@@ -444,6 +444,16 @@ def build_network(
             pair_scale = float(weight_scale) * output_recurrent_ratio
         else:
             pair_scale = float(weight_scale)
+        # Generic per-stage-pair gain, applied on top of the special cases
+        # above. Needed because the measured optic-lobe pairs cannot all share
+        # one scale: photoreceptor -> lamina saturates (the compartment runs at
+        # the refractory limit and collapses graded ink input into an
+        # all-or-none pattern, destroying label information that is still
+        # decodable at the photoreceptor), while mushroom_body -> output needs
+        # a much smaller drive to stay responsive. Keys are "<pre>><post>".
+        for key, ratio in dict(config.get("network.pair_gain", {})).items():
+            if key == f"{pre_stage}>{post_stage}":
+                pair_scale *= float(ratio)
         if normalisation_mode == "fan_in_total":
             # Normalise by the TOTAL incoming synapse weight of each
             # postsynaptic neuron, not per synapse.
