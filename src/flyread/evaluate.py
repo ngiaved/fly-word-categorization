@@ -193,9 +193,10 @@ class SignificanceResult:
     wilcoxon_p: float
     significant: bool
     test_name: str = "one-sample t-test"
+    note: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "chance_level": self.chance,
             "n_seeds": self.n_seeds,
             "mean_accuracy": self.mean,
@@ -216,6 +217,9 @@ class SignificanceResult:
                 else "held-out accuracy is NOT significantly above chance"
             ),
         }
+        if self.note:
+            payload["note"] = self.note
+        return payload
 
 
 def test_against_chance(
@@ -238,6 +242,33 @@ def test_against_chance(
         raise EvaluationError(
             f"need at least 2 seeds for a significance test, got {values.size}"
         )
+
+    # Every seed landed exactly on chance, so the sample has zero variance and
+    # the t statistic is 0/0. scipy returns nan, which would serialize into the
+    # report as a bare "nan". There is no evidence against chance, so p = 1.
+    # Zero variance with a mean that differs from chance is left to scipy, which
+    # handles it as an infinite t statistic and a p value of 0.
+    if float(values.std(ddof=1)) == 0.0 and float(values.mean()) == chance:
+        zero_variance = SignificanceResult(
+            chance=chance,
+            n_seeds=int(values.size),
+            mean=float(values.mean()),
+            std=0.0,
+            ci_low=float(values.mean()),
+            ci_high=float(values.mean()),
+            level=level,
+            t_statistic=float("nan"),
+            p_value=1.0,
+            wilcoxon_statistic=float("nan"),
+            wilcoxon_p=1.0,
+            significant=False,
+        )
+        zero_variance.note = (
+            "all seeds produced identical accuracy, so the test has zero "
+            "variance; p is reported as 1.0 and no significance is claimed"
+        )
+        return zero_variance
+
     diff = values - chance
     # One-sided: the claim under test is that accuracy is ABOVE chance. A
     # two-sided test would also flag accuracy significantly BELOW chance and
