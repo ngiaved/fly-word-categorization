@@ -76,7 +76,7 @@ benchmark:
   settle_ms: 20.0
 network:
   background_dc_na: 0.05
-  pair_weight_normalisation: mean_synapses
+  pair_weight_normalisation: fan_in
   noise:
     enabled: true
     rate_hz: 20.0

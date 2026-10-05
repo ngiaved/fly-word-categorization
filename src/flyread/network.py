@@ -13,6 +13,7 @@ keeps the three-factor rule explicit and inspectable.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -35,8 +36,14 @@ LOGGER = logging.getLogger(__name__)
 # perfectly silent, so a calibration band with a nonzero lower bound could
 # never be met. Set it just below v_threshold so spontaneous activity emerges
 # from real recurrent connectivity rather than from injected noise.
+#
+# I_syn is a SIGNED synaptic current: excitatory synapses write a positive
+# value and inhibitory synapses a negative one, following
+# ``connectome.neurotransmitter_signs``. It is therefore ADDED, so a positive
+# current depolarizes the postsynaptic neuron. Subtracting it would invert the
+# polarity of the whole network, making every excitatory connection inhibitory.
 LIF_MODEL = """
-dv/dt = (v - v_rest - I_syn + I_teacher + I_bg) / tau : 1
+dv/dt = (v - v_rest + I_syn + I_teacher + I_bg) / tau : 1
 dI_syn/dt = -I_syn/tau_syn : 1
 I_teacher : 1
 I_bg : 1
@@ -275,9 +282,6 @@ def build_network(
         for i in range(len(ordered_stages) - 1)
     } | {(name, name) for name in subcircuit.roles} | plastic_pairs | artificial_pairs
 
-    pair_weight_normalisation = str(
-        config.get("network.pair_weight_normalisation", "mean_synapses")
-    )
     trace_tau = float(config.get("learning.trace_tau_ms"))
     trace_increment = float(config.get("learning.trace_increment"))
     w_min = float(config.get("learning.w_min"))
@@ -321,27 +325,40 @@ def build_network(
             )
         syn.connect(i=pre_indices.tolist(), j=post_indices.tolist())
 
-        # Weight = synapse count * global scale, signed by transmitter. The
-        # plastic set keeps a NONNEGATIVE magnitude in plastic.weights while
-        # syn.w carries the signed current, so w_min/w_max clipping can never
-        # flip an inhibitory synapse to excitatory.
+        # Weight is normalised per stage pair so `weight_scale` has the same
+        # physical meaning everywhere. The plastic set keeps a NONNEGATIVE
+        # magnitude in plastic.weights while syn.w carries the signed current,
+        # so w_min/w_max clipping can never flip an inhibitory synapse to
+        # excitatory.
         #
-        # Raw synapse counts are normalised per stage pair. Without this,
-        # `weight_scale` has wildly different physical meaning in each pair:
-        # mushroom_body -> reinforcement averages 29 synapses per edge while
-        # reinforcement -> mushroom_body averages 0.5, so that one excitatory
-        # feedback loop is ~58x stronger than its return path. The network is
-        # then bistable -- exactly 0 Hz below threshold, 125-440 Hz above it --
-        # and no weight scale can reach the calibration band. Normalising by
-        # the pair's mean synapse count makes `weight_scale` the mean edge
-        # weight everywhere, so loop gain follows edge counts rather than
-        # synapse counts.
-        normalisation = 1.0
-        if pair_weight_normalisation == "mean_synapses" and len(n_syn):
+        # Raw synapse counts are wildly unequal: mushroom_body ->
+        # reinforcement averages 29 synapses per edge while reinforcement ->
+        # mushroom_body averages 0.5, so that one excitatory feedback loop is
+        # ~58x stronger than its return path. The network is then bistable --
+        # exactly 0 Hz below threshold, 125-440 Hz above it -- and no weight
+        # scale can reach the calibration band.
+        #
+        # `fan_in` divides each edge weight by its own synapse count, so the
+        # TOTAL current a postsynaptic neuron receives from one presynaptic
+        # spike is exactly `weight_scale`, independent of both the pair and the
+        # neuron's fan-in. Scaling UP by count (the old `mean_synapses` scheme)
+        # instead makes total drive grow with fan-in SQUARED: a neuron with
+        # twice the mean fan-in draws four times the current, so the broad
+        # excitatory optic-lobe chain runs away to the refractory limit
+        # (2000 Hz at dt=0.5 ms) and every word saturates to the same pattern.
+        normalisation_mode = str(
+            config.get("network.pair_weight_normalisation", "fan_in")
+        )
+        if normalisation_mode == "fan_in" and len(n_syn):
+            magnitude = float(weight_scale) / n_syn
+        elif normalisation_mode == "mean_synapses" and len(n_syn):
             mean_syn = float(n_syn.mean())
             if mean_syn > 0.0:
-                normalisation = mean_syn
-        magnitude = n_syn / normalisation * float(weight_scale)
+                magnitude = n_syn / mean_syn * float(weight_scale)
+            else:
+                magnitude = n_syn * float(weight_scale)
+        else:
+            magnitude = float(weight_scale) * np.ones_like(n_syn)
         weight = sign * magnitude
         syn.w = weight.tolist()
         if is_plastic:
@@ -349,9 +366,10 @@ def build_network(
         synaptic_groups[role_pair] = syn
         synapse_signs[role_pair] = sign
         LOGGER.info(
-            "synapses %-28s n=%6d sign(%+d/%d) mean_syn=%.4g norm=%.4g scale=%.4g",
+            "synapses %-28s n=%6d sign(%+d/%d) mean_syn=%.4g mode=%s scale=%.4g",
             role_pair, len(weight), int((sign > 0).sum()), int((sign < 0).sum()),
-            float(n_syn.mean()) if len(n_syn) else 0.0, normalisation, weight_scale,
+            float(n_syn.mean()) if len(n_syn) else 0.0,
+            normalisation_mode, weight_scale,
         )
         if is_plastic:
             plastic = PlasticSynapses(
@@ -392,14 +410,18 @@ def build_network(
     # met. This is declared noise, not measured FlyWire connectivity, and is
     # reported in the manifest.
     noise_groups: list[Any] = []
+    for stage in stages.values():
+        # Declared state variables shadow same-named namespace entries in
+        # Brian2, so the background drive is assigned after construction. It is
+        # set independently of the noise toggle: without it the network is
+        # perfectly silent, so tying it to ``noise.enabled`` would make a
+        # noise-free diagnostic run report zero activity everywhere.
+        stage.group.I_bg = float(config.get("network.background_dc_na"))
     if config.get("network.noise.enabled"):
         noise_rate = float(config.get("network.noise.rate_hz")) / b2.second
         noise_weight = float(config.get("network.noise.weight"))
         for stage in stages.values():
             source = b2.PoissonGroup(stage.n, rates=noise_rate, name=f"noise_{stage.name}")
-            # Declared state variables shadow same-named namespace entries in
-            # Brian2, so the background drive is assigned after construction.
-            stage.group.I_bg = float(config.get("network.background_dc_na"))
             syn_noise = b2.Synapses(
                 source, stage.group, on_pre="I_syn += w_noise", method="euler",
                 namespace={"w_noise": noise_weight},
@@ -602,6 +624,16 @@ def calibrate(
     import brian2 as b2
 
     grid = [float(x) for x in config.sequence("calibration.scale_grid")]
+    # Drive parameters searched jointly with the weight scale. An empty list
+    # means "leave the configured value alone".
+    dc_grid = [
+        float(x) for x in config.sequence("calibration.background_dc_grid")
+    ] or [None]
+    noise_grid = [
+        float(x) for x in config.sequence("calibration.noise_weight_grid")
+    ] or [None]
+    base_dc = float(config.get("network.background_dc_na"))
+    base_noise = float(config.get("network.noise.weight"))
     band = (
         float(config.get("calibration.min_mean_rate_hz")),
         float(config.get("calibration.max_mean_rate_hz")),
@@ -610,57 +642,73 @@ def calibrate(
     max_drift = float(config.get("calibration.max_rate_drift_hz"))
 
     attempts: list[dict[str, float]] = []
-    for scale in grid:
-        started = time.perf_counter()
-        network = build_network(subcircuit, config, weight_scale=scale)
-        stats = measure_spontaneous_activity(network, config)
-        elapsed = time.perf_counter() - started
-        attempt = {
-            "weight_scale": scale,
-            "mean_rate_hz": stats["mean_rate_hz"],
-            "max_rate_hz": stats["max_rate_hz"],
-            "continuous_fraction": stats["continuous_fraction"],
-            "rate_drift_hz": stats["rate_drift_hz"],
-            "seconds": elapsed,
-            "accepted": False,
-        }
-        in_band = band[0] <= stats["mean_rate_hz"] <= band[1]
-        not_saturated = stats["continuous_fraction"] <= max_continuous
-        stable = stats["rate_drift_hz"] <= max_drift
-        attempt["accepted"] = bool(in_band and not_saturated and stable)
-        attempt["in_band"] = bool(in_band)
-        attempt["not_saturated"] = bool(not_saturated)
-        attempt["stable"] = bool(stable)
-        attempts.append(attempt)
-        LOGGER.info(
-            "calibration scale=%-7g mean=%6.2f Hz cont=%.3f drift=%6.2f -> %s",
-            scale, stats["mean_rate_hz"], stats["continuous_fraction"],
-            stats["rate_drift_hz"],
-            "ACCEPT" if attempt["accepted"] else "reject",
-        )
-        if attempt["accepted"]:
-            result = CalibrationResult(
-                weight_scale=scale,
-                mean_rate_hz=stats["mean_rate_hz"],
-                max_rate_hz=stats["max_rate_hz"],
-                continuous_fraction=stats["continuous_fraction"],
-                rate_drift_hz=stats["rate_drift_hz"],
-                accepted=True,
-                attempts=attempts,
-                acceptable_band_hz=band,
-                max_continuous_fraction=max_continuous,
+    for dc, noise_weight in itertools.product(dc_grid, noise_grid):
+        for scale in grid:
+            started = time.perf_counter()
+            trial_config = config
+            if dc is not None or noise_weight is not None:
+                overrides: dict[str, Any] = {}
+                if dc is not None:
+                    overrides["network.background_dc_na"] = dc
+                if noise_weight is not None:
+                    overrides["network.noise.weight"] = noise_weight
+                trial_config = config.with_overrides(overrides)
+            network = build_network(subcircuit, trial_config, weight_scale=scale)
+            stats = measure_spontaneous_activity(network, trial_config)
+            elapsed = time.perf_counter() - started
+            used_dc = dc if dc is not None else base_dc
+            used_noise = noise_weight if noise_weight is not None else base_noise
+            attempt = {
+                "weight_scale": scale,
+                "background_dc_na": used_dc,
+                "noise_weight": used_noise,
+                "mean_rate_hz": stats["mean_rate_hz"],
+                "max_rate_hz": stats["max_rate_hz"],
+                "continuous_fraction": stats["continuous_fraction"],
+                "rate_drift_hz": stats["rate_drift_hz"],
+                "seconds": elapsed,
+                "accepted": False,
+            }
+            in_band = band[0] <= stats["mean_rate_hz"] <= band[1]
+            not_saturated = stats["continuous_fraction"] <= max_continuous
+            stable = stats["rate_drift_hz"] <= max_drift
+            attempt["accepted"] = bool(in_band and not_saturated and stable)
+            attempt["in_band"] = bool(in_band)
+            attempt["not_saturated"] = bool(not_saturated)
+            attempt["stable"] = bool(stable)
+            attempts.append(attempt)
+            LOGGER.info(
+                "calibration scale=%-7g dc=%-5g noise=%-5g mean=%6.2f Hz "
+                "cont=%.3f drift=%6.2f -> %s",
+                scale, used_dc, used_noise, stats["mean_rate_hz"],
+                stats["continuous_fraction"], stats["rate_drift_hz"],
+                "ACCEPT" if attempt["accepted"] else "reject",
             )
-            return network, result
-        # The discarded candidate must not stay referenced by Brian2's magic
-        # network, so stop the run and drop our handle before the next scale.
-        b2.stop()
-        network.brian = None
+            if attempt["accepted"]:
+                result = CalibrationResult(
+                    weight_scale=scale,
+                    mean_rate_hz=stats["mean_rate_hz"],
+                    max_rate_hz=stats["max_rate_hz"],
+                    continuous_fraction=stats["continuous_fraction"],
+                    rate_drift_hz=stats["rate_drift_hz"],
+                    accepted=True,
+                    attempts=attempts,
+                    acceptable_band_hz=band,
+                    max_continuous_fraction=max_continuous,
+                )
+                return network, result
+            # The discarded candidate must not stay referenced by Brian2's
+            # magic network, so stop the run and drop our handle before the
+            # next candidate.
+            b2.stop()
+            network.brian = None
 
     message = (
-        "weight-scale calibration rejected every candidate in "
-        f"calibration.scale_grid ({grid}); the network is either silent or "
-        f"saturated for all scales. Measured bands: "
-        f"{[(a['weight_scale'], round(a['mean_rate_hz'], 3)) for a in attempts]}"
+        "calibration rejected every candidate in the joint "
+        f"scale_grid x background_dc_grid x noise_weight_grid search "
+        f"({len(grid)}x{len(dc_grid)}x{len(noise_grid)}); the network is "
+        "either silent or saturated everywhere. Measured mean rates (Hz): "
+        f"{[(a['weight_scale'], a['background_dc_na'], a['noise_weight'], round(a['mean_rate_hz'], 3)) for a in attempts]}"
     )
     if manifest is not None:
         manifest.warn(message)

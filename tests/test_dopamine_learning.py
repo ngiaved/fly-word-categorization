@@ -94,10 +94,24 @@ def test_eligibility_trace_decays_toward_zero():
     # Requirement: Eligibility trace -- decays toward zero with no activity
     import brian2 as b2
 
-    cfg = _config()
+    cfg = _config(**{"network.noise.enabled": "false"})
     built = _built(cfg)
     syn = built.synaptic_groups[built.plastic.role_pair]
     tau_ms = float(cfg.get("learning.trace_tau_ms"))
+
+    # Isolate the decay: every pre/post spike ADDS eligibility via the
+    # trace_inc increments, so an active network would mask or reverse the
+    # exponential decay. Quiesce every population and drop the injected
+    # Poisson noise, which spikes independently of I_bg.
+    for stage in built.stages.values():
+        stage.group.I_bg = 0.0
+        stage.group.I_syn = 0.0
+        stage.group.I_teacher = 0.0
+        stage.group.v[:] = 0.0
+    built.reserve.I_bg = 0.0
+    built.reserve.I_syn = 0.0
+    built.reserve.I_teacher = 0.0
+    built.reserve.v[:] = 0.0
 
     syn.elig[:] = 0.4
     initial = float(np.max(syn.elig[:]))

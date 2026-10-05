@@ -692,27 +692,117 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
     selection_detail: dict[str, Any] = {}
     upstream: set[int] = set()
 
+    # Backward seeding of the visual chain. Ranking each stage by the synapses
+    # it RECEIVES from the previous stage does not guarantee the chain reaches
+    # the end. Measured on release 783: the medulla neurons picked that way
+    # project to none of the top-ranked lobula candidates, so the lobula
+    # finished with ZERO in-edges and the artificial lobula -> Kenyon-cell
+    # bridge carried no visual signal at all (the manifest's own reachability
+    # block reported `signal_reaches_outputs: false`).
+    #
+    # Seeding the whole chain backward fixes it with real connectivity. The
+    # last stage is ranked by input from its predecessor's CANDIDATE pool;
+    # every earlier stage is then ranked by what it SENDS to the stage already
+    # seeded. Ranking one link backward is not enough on its own: preferring
+    # only `medulla -> lobula` satisfies that link and silently drops
+    # `lamina -> medulla`, which just moves the break upstream.
+    backward_chain = [
+        str(s) for s in (config.get("subcircuit.selection.backward_chain") or [])
+    ]
+    preselected: dict[str, list[int]] = {}
+    seed_rule_detail: dict[str, str] = {}
+    if len(backward_chain) >= 2:
+        caps = {s["name"]: int(s["cap"]) for s in stages}
+        order = [s["name"] for s in stages]
+        last = backward_chain[-1]
+        prev = order[order.index(last) - 1] if order.index(last) > 0 else ""
+        last_pool = list(candidates.get(last) or [])
+        prev_pool = set(candidates.get(prev) or [])
+        if last_pool and prev_pool:
+            strength = _incoming_strength(
+                set(last_pool), prev_pool, edges_pre, edges_post, edges_n
+            )
+            preselected[last] = sorted(
+                last_pool, key=lambda r: (-strength.get(r, 0), r)
+            )[:caps.get(last, len(last_pool))]
+            seed_rule_detail[last] = (
+                f"backward seed: top {caps.get(last)} candidates by synapses "
+                f"received from the {prev} CANDIDATE pool"
+            )
+            LOGGER.info(
+                "backward seed %s: %d/%d candidates receive from the %s pool",
+                last, sum(1 for r in last_pool if strength.get(r, 0) > 0),
+                len(last_pool), prev,
+            )
+        for position in range(len(backward_chain) - 2, -1, -1):
+            name = backward_chain[position]
+            downstream = backward_chain[position + 1]
+            pool = list(candidates.get(name) or [])
+            target = set(preselected.get(downstream) or [])
+            if not pool or not target:
+                continue
+            outgoing = _outgoing_strength(
+                set(pool), target, edges_pre, edges_post, edges_n
+            )
+            preselected[name] = sorted(
+                pool, key=lambda r: (-outgoing.get(r, 0), r)
+            )[:caps.get(name, len(pool))]
+            seed_rule_detail[name] = (
+                f"backward seed: top {caps.get(name)} candidates by synapses sent "
+                f"to the seeded {downstream}"
+            )
+            LOGGER.info(
+                "backward seed %s: %d/%d candidates project to the seeded %s",
+                name, sum(1 for r in pool if outgoing.get(r, 0) > 0),
+                len(pool), downstream,
+            )
+
     for stage in stages:
         name = stage["name"]
         pool = candidates[name]
         cap = int(stage["cap"])
         if name in OUTPUT_STAGES:
             cap = n_outputs
-        strength = _incoming_strength(
-            set(pool), upstream, edges_pre, edges_post, edges_n
-        ) if pool else {}
-        ranked = sorted(pool, key=lambda r: (-strength.get(r, 0), r)) if pool else []
-        chosen = ranked[:cap]
-        selected[name] = chosen
-        if upstream:
-            rule = (
-                "top N candidates by synapses received from the previously "
-                "selected stages; ties broken by ascending root_id"
+        if name in preselected:
+            chosen = preselected[name]
+            rule = seed_rule_detail.get(name, "backward seed") + (
+                "; ties broken by ascending root_id"
             )
+            # Report connectivity the way the stage was actually ranked, so
+            # `driven_selected` in the manifest reflects the seeded linkage
+            # rather than the forward rule that was not used here.
+            downstream = None
+            if name in backward_chain:
+                position = backward_chain.index(name)
+                if position + 1 < len(backward_chain):
+                    downstream = set(
+                        preselected.get(backward_chain[position + 1]) or []
+                    )
+            if downstream:
+                strength = _outgoing_strength(
+                    set(pool), downstream, edges_pre, edges_post, edges_n
+                ) if pool else {}
+            else:
+                strength = {}
         else:
-            rule = (
-                "input stage: all candidates in root_id order, truncated to the cap"
-            )
+            strength = _incoming_strength(
+                set(pool), upstream, edges_pre, edges_post, edges_n
+            ) if pool else {}
+            ranked = sorted(
+                pool, key=lambda r: (-strength.get(r, 0), r)
+            ) if pool else []
+            chosen = ranked[:cap]
+            if upstream:
+                rule = (
+                    "top N candidates by synapses received from the previously "
+                    "selected stages; ties broken by ascending root_id"
+                )
+            else:
+                rule = (
+                    "input stage: all candidates in root_id order, truncated to "
+                    "the cap"
+                )
+        selected[name] = chosen
         selection_detail[name] = {
             "rule": rule,
             "candidates": len(pool),

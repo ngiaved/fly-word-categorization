@@ -119,6 +119,24 @@ subcircuit:
       cap: 4
   # Exclude neurons flagged as segmentation or biology outliers.
   exclude_outliers: true
+  # Backward seeding. Ranking every stage by input from the PREVIOUS stage
+  # does not guarantee the chain reaches the end: the medulla neurons chosen
+  # that way send no synapses to the top-ranked lobula candidates, so the
+  # lobula ends up with zero in-edges and the artificial lobula -> Kenyon-cell
+  # bridge carries no visual signal. `stage` is therefore seeded from the
+  # `source` CANDIDATE pool, and `source` is then forced to be neurons that
+  # actually project to it. Both selections stay real FlyWire connectivity.
+  selection:
+    # Seed the whole visual chain BACKWARD from the lobula. Ranking each
+    # stage by input from the previous stage does not guarantee the chain
+    # reaches the end: on release 783 the medulla neurons chosen that way
+    # project to none of the top-ranked lobula candidates, so the lobula ended
+    # up with zero in-edges and the artificial lobula -> Kenyon-cell bridge
+    # carried no visual signal (the manifest's own reachability block reported
+    # `signal_reaches_outputs: false`). Seeding `lobula` from the medulla
+    # candidate pool, then each earlier stage by what it sends to the stage
+    # already seeded, keeps every edge real. Listed in signal order.
+    backward_chain: [photoreceptor, lamina, medulla, lobula]
   # Restrict the subcircuit to one hemisphere to halve the size. "" disables.
   restrict_side: ""
   # Max path length (in hops) used to verify photoreceptor -> output reachability.
@@ -203,6 +221,15 @@ calibration:
   enabled: true
   # Global multiplier searched over `scale_grid`.
   scale_grid: [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4]
+  # Drive parameters searched jointly with `scale_grid`. An empty list means
+  # "use the value from `network` unchanged". These are searched because with
+  # the LIF sign convention corrected the network is bistable in `scale_grid`
+  # alone: `background_dc_na` sets how far below threshold every population
+  # sits, and the injected noise weight sets the resulting spontaneous rate.
+  # Without them no scale lands in the 0.5-15 Hz band, because the transition
+  # from fully silent to saturated happens inside one grid step.
+  background_dc_grid: [0.0, 0.1, 0.25, 0.5]
+  noise_weight_grid: [0.05, 0.15, 0.3, 0.6]
   simulated_ms: 300.0
   # Settling time excluded from the measurement, in ms.
   settle_ms: 50.0

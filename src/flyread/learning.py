@@ -316,11 +316,18 @@ class TrialRunner:
         self._photoreceptor_group().I_syn = 0.0
 
     def _photoreceptor_group(self):
+        """The Brian2 NeuronGroup that receives the visual drive.
+
+        ``network.stages`` maps a role name to a ``StageGroup`` wrapper, not to
+        the Brian2 group. Assigning ``I_syn`` on the wrapper would silently
+        create a plain Python attribute and leave the simulated neuron
+        untouched, so the underlying group must be unwrapped here.
+        """
         from .connectome import INPUT_STAGES
 
         for name in INPUT_STAGES:
             if name in self.network.stages:
-                return self.network.stages[name]
+                return self.network.stages[name].group
         raise LearningError("network has no photoreceptor group to drive")
 
     # -- one trial ------------------------------------------------------
@@ -522,7 +529,11 @@ class TrialRunner:
         from .connectome import OUTPUT_STAGES
 
         v_rest = float(self.config.get("network.lif.v_rest"))
-        for group in self.network.stages.values():
+        for stage in self.network.stages.values():
+            # Unwrap to the Brian2 group: ``stage`` is a StageGroup wrapper, so
+            # assigning ``.v`` on it would set a Python attribute and never
+            # reset the simulated membrane potential.
+            group = stage.group
             group.v = v_rest
             group.I_syn = 0.0
         self.network.reserve.v = v_rest

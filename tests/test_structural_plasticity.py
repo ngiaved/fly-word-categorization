@@ -146,7 +146,7 @@ def test_recruited_reserve_neurons_can_spike():
     sp.step(trial=10)
 
     # dv/dt = (v - v_rest - I_syn + ...)/tau, so negative I_syn is excitatory.
-    built.reserve.I_syn[:] = -5.0
+    built.reserve.I_syn[:] = 5.0
     monitor = b2.SpikeMonitor(built.reserve, record=False)
     built.brian.add(monitor)
     built.brian.run(300 * b2.ms)

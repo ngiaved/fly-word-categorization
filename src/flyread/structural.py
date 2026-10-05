@@ -466,18 +466,18 @@ class StructuralPlasticity:
     def _synapse_rows_for_pre(self, local_index: int) -> np.ndarray:
         """Plastic synapse rows whose presynaptic neuron is ``local_index``.
 
-        ``plastic.pre_indices`` are subcircuit indices; the upstream stage maps
-        them to a dense local axis.
+        ``plastic.pre_indices`` are already DENSE LOCAL indices into the upstream
+        stage: ``network.build_network`` remaps every edge through the
+        per-stage local mapper before storing it, because Brian2 connects with
+        local indices. No subgraph translation is needed or wanted here.
         """
+        if not 0 <= local_index < self._upstream_n():
+            return np.array([], dtype=np.int64)
+        return np.flatnonzero(self.plastic.pre_indices == local_index)
+
+    def _upstream_n(self) -> int:
         stage = self._upstream_stage()
-        if stage is None:
-            return np.array([], dtype=np.int64)
-        group = self.network.stages[stage]
-        hits = np.flatnonzero(group.indices == local_index)
-        if hits.size == 0:
-            return np.array([], dtype=np.int64)
-        internal = int(hits[0])
-        return np.flatnonzero(self.plastic.pre_indices == internal)
+        return 0 if stage is None else self.network.stages[stage].n
 
     def _pick_template(self) -> tuple[str, int] | None:
         stage = self._upstream_stage()

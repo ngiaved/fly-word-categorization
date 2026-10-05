@@ -165,6 +165,24 @@ class Config:
             raise ConfigError("invalid override\n  " + "\n  ".join(errors))
         self._data = deep_merge(self._data, parsed)
 
+    def with_overrides(self, overrides: dict[str, Any]) -> "Config":
+        """Return an independent copy with ``dotted.path`` keys replaced.
+
+        Unlike :meth:`apply_overrides` this never mutates ``self``, which the
+        calibration search relies on: it derives a candidate configuration per
+        grid point and must be able to discard it without disturbing the base.
+        Values are used as-is (no string coercion), so callers can pass floats.
+        """
+        if not overrides:
+            return Config(self.to_dict(), self.source)
+        parsed: dict = {}
+        for key, value in overrides.items():
+            parsed = deep_merge(parsed, _expand(key.strip(), value))
+        errors = _reject_unknown(self._data, parsed)
+        if errors:
+            raise ConfigError("invalid override\n  " + "\n  ".join(errors))
+        return Config(deep_merge(self.to_dict(), parsed), self.source)
+
     def get(self, dotted: str, default: Any = _MISSING) -> Any:  # type: ignore[name-defined]
         node: Any = self._data
         for part in dotted.split("."):
