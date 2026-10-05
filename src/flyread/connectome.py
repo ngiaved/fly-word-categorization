@@ -777,6 +777,27 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
             sorted(unknown_nt),
         )
 
+    # Memory budget. Extraction is a single streaming pass, so peak RSS is
+    # dominated by the retained candidate-edge arrays rather than the input
+    # file. Report it and fail fast if the configured budget is exceeded, as
+    # required by the connectome-loading spec.
+    try:
+        import psutil
+
+        peak_mb = round(psutil.Process().memory_info().rss / 1024**2, 1)
+    except ImportError:  # pragma: no cover
+        peak_mb = float("nan")
+    budget_mb = float(config.get("resources.memory_budget_mb"))
+    LOGGER.info(
+        "subcircuit peak memory %.1f MB of a %.0f MB budget", peak_mb, budget_mb
+    )
+    if budget_mb > 0 and peak_mb == peak_mb and peak_mb > budget_mb:
+        raise MemoryError(
+            f"subcircuit extraction used {peak_mb:.1f} MB, exceeding the "
+            f"configured memory budget of {budget_mb:.0f} MB; reduce "
+            "subcircuit.candidate or raise resources.memory_budget_mb"
+        )
+
     roles_internal = {
         stage["name"]: sorted(index[r] for r in selected[stage["name"]] if r in index)
         for stage in stages
