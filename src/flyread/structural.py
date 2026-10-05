@@ -159,10 +159,13 @@ class StructuralPlasticity:
 
     @property
     def reserve_available(self) -> int:
-        recruited_synapses = (
-            len(self._reserve_stage) if self._reserve_stage else 0
-        )
-        return max(0, self.stats.reserve_available - self._recruited)
+        """Reserve neurons not yet recruited.
+
+        Derived from the physical pool size and the recruited count so there is
+        exactly one source of truth. Subtracting from the running stat as well
+        would count each recruitment twice and report exhaustion early.
+        """
+        return max(0, int(self.network.reserve.N) - self._recruited)
 
     # -- observation ----------------------------------------------------
     def set_trial_duration(self, seconds: float) -> None:
@@ -209,7 +212,11 @@ class StructuralPlasticity:
         """Plastic synapses below threshold, respecting the total-change cap."""
         weights = self.plastic.weights
         active = self.plastic.active
-        below = np.flatnonzero((weights < self.prune_threshold) & active)
+        # Keep the boolean mask and the index array separate. ``below`` holds
+        # indices, so ``~below`` is a bitwise complement (negative indices),
+        # not the set of synapses that are NOT below threshold.
+        below_mask = (weights < self.prune_threshold) & active
+        below = np.flatnonzero(below_mask)
         self.stats.candidate_totals["prune"] = int(below.size)
 
         # Consecutive-check state is tracked PER SYNAPSE. A single global
@@ -218,7 +225,7 @@ class StructuralPlasticity:
         if self._below_count is None or len(self._below_count) != weights.size:
             self._below_count = np.zeros(weights.size, dtype=np.int64)
         self._below_count[below] += 1
-        self._below_count[~below] = 0
+        self._below_count[~below_mask] = 0
 
         if self.prune_checks > 0:
             eligible = np.flatnonzero(
@@ -391,15 +398,27 @@ class StructuralPlasticity:
         if template is None:
             return []
         template_stage, template_local = template
-        pre_local = self._synapse_rows_for_pre(template_local)
+        pre_rows = self._synapse_rows_for_pre(template_local)
 
-        if pre_local.size == 0:
+        if pre_rows.size == 0:
             LOGGER.info("trial %d: template neuron has no plastic inputs to clone", trial)
             return []
 
-        n_syn = min(len(pre_local), 8)
-        pre_local = pre_local[:n_syn]
-        template_weights = self.plastic.weights[pre_local]
+        n_syn = min(len(pre_rows), 8)
+        pre_rows = pre_rows[:n_syn]
+        template_weights = self.plastic.weights[pre_rows]
+        # ``pre_rows`` indexes the plastic weight array, NOT the source
+        # NeuronGroup. The presynaptic neuron is the template itself, so the
+        # source index for every cloned synapse is the template's local index.
+        source_local = int(template_local)
+        source_group = self.network.stages[template_stage].group
+        if not 0 <= source_local < int(source_group.N):
+            LOGGER.warning(
+                "trial %d: template local index %d is outside source group of "
+                "size %d; skipping recruitment",
+                trial, source_local, int(source_group.N),
+            )
+            return []
 
         events: list[StructuralEvent] = []
         for _offset in range(n_new):
@@ -407,14 +426,21 @@ class StructuralPlasticity:
             # directly; adding an offset here as well would skip neurons and
             # eventually index past the end of the reserve group.
             reserve_local = self._recruited
-            noise = 1.0 + self.recruit_noise * self._rng.standard_normal(pre_local.size)
+            if not 0 <= reserve_local < int(self.network.reserve.N):
+                LOGGER.warning(
+                    "trial %d: reserve index %d is outside the reserve pool of "
+                    "size %d; skipping recruitment",
+                    trial, reserve_local, int(self.network.reserve.N),
+                )
+                return events
+            noise = 1.0 + self.recruit_noise * self._rng.standard_normal(pre_rows.size)
             new_weights = template_weights * self.recruit_fraction * noise
             self._reserve_stage.connect(
-                i=pre_local.tolist(),
-                j=[reserve_local] * len(pre_local),
+                i=[source_local] * len(pre_rows),
+                j=[reserve_local] * len(pre_rows),
             )
             self._reserve_stage.active = True
-            start = len(self._reserve_stage) - len(pre_local)
+            start = len(self._reserve_stage) - len(pre_rows)
             self._reserve_stage.w[start:] = np.clip(new_weights, 0.0, None).tolist()
             self._recruited += 1
             events.append(StructuralEvent(
@@ -423,14 +449,17 @@ class StructuralPlasticity:
                     "template_stage": template_stage,
                     "template_index": int(template_local),
                     "new_neuron_index": int(reserve_local),
-                    "n_synapses": int(len(pre_local)),
+                    "n_synapses": int(len(pre_rows)),
                     "weight_fraction": self.recruit_fraction,
                     "noise": self.recruit_noise,
                     "mean_weight": float(np.mean(new_weights)),
                 },
             ))
         self.stats.recruits += n_new
-        self.stats.reserve_available = max(0, self.stats.reserve_available - n_new)
+        # Keep the stat in step with reality for reporting. The
+        # ``reserve_available`` property recomputes from the pool size and the
+        # recruited count, so it must not be derived from this field as well.
+        self.stats.reserve_available = self.reserve_available
         LOGGER.info("trial %d: recruited %d reserve neurons", trial, n_new)
         return events
 
