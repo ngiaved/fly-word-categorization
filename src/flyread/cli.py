@@ -270,7 +270,7 @@ def cmd_evaluate(args, config: Config) -> int:
     weight_scale = calibration.weight_scale
 
     conditions = list(config.get("evaluation.conditions"))
-    n_seeds = int(args.n_seeds or config.get("evaluation.n_seeds"))
+    n_seeds = int(getattr(args, "n_seeds", None) or config.get("evaluation.n_seeds"))
     if n_seeds < 10:
         manifest.warn(
             f"evaluation.n_seeds = {n_seeds} is below the spec minimum of 10; "
