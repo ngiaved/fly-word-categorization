@@ -157,6 +157,11 @@ def cmd_inspect(args, config: Config) -> int:
         print(f"  {name}")
     rows = connection_row_count(config.get("connectome.connections_file"))
     print(f"\nconnection rows: {rows:,}")
+    print(f"flywire release: {config.get('data.release')}")
+    print(f"annotations file: {config.get('connectome.annotations_file')}")
+    print(f"connections file: {config.get('connectome.connections_file')}")
+    print(f"annotations md5: {config.get('connectome.annotations_md5')}")
+    print(f"connections md5: {config.get('connectome.connections_md5')}")
 
     if args.subcircuit:
         manifest, _dataset, subcircuit, _seed = _prepare(config, args)
