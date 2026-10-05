@@ -551,10 +551,15 @@ def measure_spontaneous_activity(
     # Drift: compare mean rate in the first and second halves of the SAME
     # window. Both halves span the same duration, so the comparison is valid.
     half_s = (measure_ms / 2.0) * 1e-3
-    if n_neurons:
-        halves = counts.reshape(2, -1)
-        first_rate = float(halves[0].sum() / half_s / n_neurons)
-        second_rate = float(halves[1].sum() / half_s / n_neurons)
+    if n_neurons >= 2:
+        # Split by index, not by reshape: an odd neuron count cannot be split
+        # evenly. Both halves must cover the same duration for the comparison
+        # to be meaningful, so one neuron is dropped from the second half when
+        # the count is odd. This is a measurement artifact only; it does not
+        # affect the reported mean rate or the continuous-fraction test.
+        half = n_neurons // 2
+        first_rate = float(counts[:half].sum() / half_s / half)
+        second_rate = float(counts[half: 2 * half].sum() / half_s / half)
         rate_drift = abs(second_rate - first_rate)
     else:
         first_rate = second_rate = 0.0
