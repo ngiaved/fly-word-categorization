@@ -216,7 +216,9 @@ network:
   # Number of output neurons. Must equal encoding.n_categories.
   n_outputs: 4
   # Reserve pool of neurons born silent and unconnected (see structural spec).
-  reserve_size: 48
+  # Sized at ~10% of the simulated pathway (1,928 neurons -> 200 reserves);
+  # the reserve is the hard cap on how many neurons recruitment may add.
+  reserve_size: 200
   # Populations used as templates/recruitment targets, by role.
   lif:
     tau_ms: 20.0
@@ -330,10 +332,24 @@ network:
 
 # Calibration (no external stimulus). The global weight scale is searched so
 # spontaneous firing sits inside the acceptable band without saturating.
+#
+# MEASURED REGIME (release 783, medium candidate, 1928 neurons): the network
+# is bistable in drive alone. With background_dc=0 the spontaneous rate is set
+# jointly by noise weight and weight scale, and the in-band stationary
+# operating points all sit at noise 2.5-4.0 with weight scale 3-6:
+#   noise 4.0, scale 4.0 -> 6.3-6.8 Hz, cont 0.002-0.006, drift 0.2-2.0
+#   (verified stationary over 20+ s on seeds 1000-1003)
+# Larger scales (>=7) run away past 15 Hz; scale <=3 is silent. The old grid
+# started at scale 10 with noise <=5, i.e. entirely outside this regime, so
+# every one of its 360 candidates was rejected. Grid order is search order:
+# dc is the outer loop, noise the middle, scale the inner, so the first
+# accept wins -- keep the known-good region early.
 calibration:
   enabled: true
-  # Global multiplier searched over `scale_grid`.
-  scale_grid: [10.0, 25.0, 50.0, 100.0, 200.0, 350.0, 500.0, 700.0, 1000.0, 1500.0]
+  # Global multiplier searched over `scale_grid`. Small scales first: the
+  # in-band stationary region measured above is scale 3-6, and the larger
+  # values are kept only as fallbacks for other candidates/noise settings.
+  scale_grid: [4.0, 3.0, 5.0, 6.0, 7.0, 8.0, 10.0, 25.0, 50.0, 100.0, 200.0, 350.0, 500.0, 700.0, 1000.0, 1500.0]
   # A candidate is rejected unless its strongest edge can drive a postsynaptic
   # neuron from a single spike, which for this cell means an edge of at least
   # 6.35 nA (see network.transmission_weight). Without this, the 0.5-15 Hz band
@@ -346,21 +362,27 @@ calibration:
   # sits, and the injected noise weight sets the resulting spontaneous rate.
   # Without them no scale lands in the 0.5-15 Hz band, because the transition
   # from fully silent to saturated happens inside one grid step.
-  # `background_dc_grid` and `noise_weight_grid` are in CURRENT units, and
-  # with a restoring leak a neuron reaches `v_threshold` only when the
-  # drive exceeds `v_threshold / tau` = 1.0/0.02 = 50 nA. Grids in the
-  # sub-1 range could never reach threshold and calibration rejected
-  # every candidate.
+  # `background_dc_grid` and `noise_weight_grid` are in CURRENT units (not
+  # multiplied by weight_scale): noise weight 0.9 nA at 20 Hz sits far below
+  # the ~50 nA sustained drive a LIF cell needs, so sub-1 noise weights can
+  # never fire and are kept only to document the silent corner. The measured
+  # in-band region needs noise 2.5-4.0.
   background_dc_grid: [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
-  noise_weight_grid: [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
-  simulated_ms: 300.0
+  noise_weight_grid: [4.0, 3.0, 2.5, 5.0, 2.0, 1.0, 0.5, 0.0]
+  # The window must cover the initial ramp: at noise 2.5-4.0 the rate takes
+  # ~0.3-1 s to reach its plateau, and a 300 ms window samples only the
+  # onset (measured 0.27 Hz where the plateau is 5.9 Hz). 1000 ms of
+  # measurement after a 500 ms settle lands on the plateau.
+  simulated_ms: 1500.0
   # Settling time excluded from the measurement, in ms.
-  settle_ms: 50.0
+  settle_ms: 500.0
   min_mean_rate_hz: 0.5
   max_mean_rate_hz: 15.0
   # Fraction of neurons allowed to fire continuously (>= 1 spike per tau).
   max_continuous_fraction: 0.02
-  # Reject scales whose drift exceeds this, in Hz.
+  # Reject scales whose drift exceeds this, in Hz. Drift compares the mean
+  # rate of the SAME neurons in the two consecutive halves of the measurement
+  # window (network.measure_spontaneous_activity).
   max_rate_drift_hz: 5.0
 
 encoding:
@@ -456,13 +478,15 @@ structural:
   silence_rate_threshold_hz: 0.1
   silence_window_trials: 50
   # Recruitment: how often to attempt growth, and how much to clone.
-  recruit_every_n_checks: 4
+  # Every check recruits, so over a 600-trial run (24 checks) the reserve
+  # grows by ~8 per check = ~192 neurons, the 10% target.
+  recruit_every_n_checks: 1
   recruit_weight_fraction: 0.2
   recruit_noise: 0.05
   # Rate limits.
   max_prunes_per_interval: 64
   max_silences_per_interval: 8
-  max_recruits_per_interval: 4
+  max_recruits_per_interval: 8
   # Total fraction of the plastic pathway that may be pruned or silenced.
   max_total_fraction_pruned: 0.5
   max_total_fraction_silenced: 0.25
