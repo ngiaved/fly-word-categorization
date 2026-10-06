@@ -317,8 +317,8 @@ network:
   # Reward signal injected into the real reinforcement stage. The reward VALUE
   # is synthetic; the neurons receiving it (APL/DPM) and their real synapses
   # onto Kenyon cells are genuine FlyWire neurons and connections.
-  reward_gain_na: 0.01
-  punishment_gain_na: 0.01
+  reward_gain_na: 120.0
+  punishment_gain_na: 120.0
   # Time constant of the injected reward current, in ms.
   reward_tau_ms: 120.0
 
