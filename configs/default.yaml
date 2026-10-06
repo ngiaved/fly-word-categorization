@@ -216,9 +216,9 @@ network:
   # Number of output neurons. Must equal encoding.n_categories.
   n_outputs: 4
   # Reserve pool of neurons born silent and unconnected (see structural spec).
-  # Sized at ~10% of the simulated pathway (1,928 neurons -> 200 reserves);
-  # the reserve is the hard cap on how many neurons recruitment may add.
-  reserve_size: 200
+  # The reserve is the hard cap on how many neurons recruitment may add;
+  # 1,000 is roughly half the 1,928-neuron pathway.
+  reserve_size: 1000
   # Populations used as templates/recruitment targets, by role.
   lif:
     tau_ms: 20.0
@@ -478,15 +478,15 @@ structural:
   silence_rate_threshold_hz: 0.1
   silence_window_trials: 50
   # Recruitment: how often to attempt growth, and how much to clone.
-  # Every check recruits, so over a 600-trial run (24 checks) the reserve
-  # grows by ~8 per check = ~192 neurons, the 10% target.
+  # Every check recruits; over a 600-trial run (24 checks) at ~45 per check
+  # the reserve fills to its 1,000-neuron cap.
   recruit_every_n_checks: 1
   recruit_weight_fraction: 0.2
   recruit_noise: 0.05
   # Rate limits.
   max_prunes_per_interval: 64
   max_silences_per_interval: 8
-  max_recruits_per_interval: 8
+  max_recruits_per_interval: 45
   # Total fraction of the plastic pathway that may be pruned or silenced.
   max_total_fraction_pruned: 0.5
   max_total_fraction_silenced: 0.25
