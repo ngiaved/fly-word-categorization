@@ -506,7 +506,15 @@ class TrialRunner:
         if dopamine > 0:
             current = float(config.get("network.reward_gain_na")) * abs(dopamine)
         elif dopamine < 0:
-            current = -float(config.get("network.punishment_gain_na")) * abs(dopamine)
+            # Aversive valence lives in the dopamine VALUE (-1), not in the
+            # polarity of the injected current. Driving the reinforcement
+            # neurons with a negative current hyperpolarizes them below the LIF
+            # threshold, producing zero spikes, a gate of 0.0, and hence a
+            # zeroed dopamine that `apply_dopamine` early-returns on: the
+            # punishment arm of the three-factor rule is then dead and weights
+            # can only ever grow. Fire them so the negative dopamine reaches
+            # the plastic weights and can decrease them.
+            current = float(config.get("network.punishment_gain_na")) * abs(dopamine)
         else:
             return 0.0
 

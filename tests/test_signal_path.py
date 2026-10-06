@@ -194,3 +194,35 @@ def test_output_response_depends_on_the_word(driven):
         "output response must vary across words; an identical response for "
         "every word means the stimulus never reached the readout"
     )
+
+
+def test_punishment_drives_the_teacher_and_reaches_the_weights(driven):
+    """Regression: the punishment arm of the three-factor rule was dead.
+
+    ``_deliver_teaching`` injected a NEGATIVE current for punishment, which
+    hyperpolarized the APL/DPM reinforcement neurons below the LIF threshold.
+    They produced zero spikes, the gate came back 0.0, and ``dopamine = -1.0 *
+    0.0 = 0.0`` made ``apply_dopamine`` early-return. Every trial then only
+    ever increased the plastic weights (a reward-only random walk), so the
+    readout could never be shaped and accuracy stayed at chance.
+
+    The unit tests passed because they called ``apply_dopamine(-1.0)``
+    directly, bypassing the teacher gate entirely.
+    """
+    cfg, built, runner = driven
+    syn = built.synaptic_groups[built.plastic.role_pair]
+    syn.elig[:] = 0.5
+
+    before_sum = float(built.plastic.weights.sum())
+    gate = runner._deliver_teaching(-1.0, 0)
+    assert gate > 0.0, (
+        "punishment must fire the reinforcement neurons; a zero gate zeroes "
+        f"dopamine and makes weights grow monotonically, got gate={gate}"
+    )
+    result = learning.apply_dopamine(built, cfg, -1.0 * gate)
+    after_sum = float(built.plastic.weights.sum())
+    assert result["changed"] > 0
+    assert after_sum < before_sum, (
+        "punishment must decrease the plastic weight sum; "
+        f"before={before_sum} after={after_sum}"
+    )
