@@ -808,8 +808,21 @@ def measure_spontaneous_activity(
     }
 
     measure_ms = max(simulated_ms - settle_ms, 1.0)
+    # The measurement window is split into two consecutive halves so drift can
+    # be measured TEMPORALLY: the same neurons are counted in the first half
+    # and in the second half, and the two mean rates are compared. Splitting
+    # the count vector by neuron index instead compares stage populations
+    # against each other (photoreceptor vs. output), which is a static
+    # difference between stages, not drift over time.
+    first_ms = measure_ms / 2.0
+    second_ms = measure_ms - first_ms
     started = time.perf_counter()
-    network.brian.run(measure_ms * b2.ms)
+    network.brian.run(first_ms * b2.ms)
+    midway = {
+        name: np.asarray(monitor.count, dtype=np.int64).copy()
+        for name, monitor in monitors.items()
+    }
+    network.brian.run(second_ms * b2.ms)
     wall_seconds = time.perf_counter() - started
 
     # These monitors are per-candidate scratch objects. Leaving them attached
@@ -822,6 +835,21 @@ def measure_spontaneous_activity(
     }
     elapsed_s = measure_ms * 1e-3
     counts = np.concatenate(list(per_stage.values()))
+    first_counts = np.concatenate(
+        [
+            np.maximum(midway[name] - settled[name], 0.0)
+            for name in monitors
+        ]
+    )
+    second_counts = np.concatenate(
+        [
+            np.maximum(
+                np.asarray(monitor.count, dtype=np.float64) - midway[name],
+                0.0,
+            )
+            for name, monitor in monitors.items()
+        ]
+    )
 
     n_neurons = int(counts.size)
     total_rate = float(counts.sum() / elapsed_s) if elapsed_s else 0.0
@@ -837,17 +865,17 @@ def measure_spontaneous_activity(
     )
 
     # Drift: compare mean rate in the first and second halves of the SAME
-    # window. Both halves span the same duration, so the comparison is valid.
-    half_s = (measure_ms / 2.0) * 1e-3
-    if n_neurons >= 2:
-        # Split by index, not by reshape: an odd neuron count cannot be split
-        # evenly. Both halves must cover the same duration for the comparison
-        # to be meaningful, so one neuron is dropped from the second half when
-        # the count is odd. This is a measurement artifact only; it does not
-        # affect the reported mean rate or the continuous-fraction test.
-        half = n_neurons // 2
-        first_rate = float(counts[:half].sum() / half_s / half)
-        second_rate = float(counts[half: 2 * half].sum() / half_s / half)
+    # window. The same neurons are counted in both halves, so a nonzero
+    # difference is a change of the network's activity over time rather than
+    # a difference between neuron populations. Both halves are divided by
+    # their own duration, so an odd split (one ms on one side) stays valid.
+    if n_neurons and (first_ms > 0) and (second_ms > 0):
+        first_rate = float(
+            first_counts.sum() / (first_ms * 1e-3) / n_neurons
+        )
+        second_rate = float(
+            second_counts.sum() / (second_ms * 1e-3) / n_neurons
+        )
         rate_drift = abs(second_rate - first_rate)
     else:
         first_rate = second_rate = 0.0

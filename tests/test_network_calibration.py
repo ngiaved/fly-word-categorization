@@ -82,18 +82,20 @@ def test_saturating_scale_is_rejected():
     )
 
 
-def test_drift_split_handles_odd_neuron_counts():
-    # The drift metric splits the count vector in half. An odd neuron count must
-    # not raise, and both halves must cover the same duration.
+def test_drift_is_temporal_not_per_neuron_split():
+    # The drift metric must compare the SAME neurons across two consecutive
+    # time halves of the measurement window. The old implementation split the
+    # per-neuron count vector by index, which compared stage populations
+    # (photoreceptor vs. output) -- a static stage difference, not drift.
     cfg = _config()
-    for n_neurons in (1, 2, 3, 5, 8, 9):
-        counts = np.arange(n_neurons, dtype=np.float64)
-        n = int(counts.size)
-        half_s = 0.1
-        if n >= 2:
-            half = n // 2
-            first = counts[:half].sum() / half_s / half
-            second = counts[half: 2 * half].sum() / half_s / half
-            assert np.isfinite(abs(second - first))
-        else:
-            assert n < 2
+    sc = _subcircuit(cfg)
+    built = net.build_network(sc, cfg, weight_scale=10.0)
+    stats = net.measure_spontaneous_activity(built, cfg)
+
+    first = stats["first_half_rate_hz"]
+    second = stats["second_half_rate_hz"]
+    assert np.isfinite(first) and np.isfinite(second)
+    assert stats["rate_drift_hz"] == abs(second - first)
+    # Both halves count every reported neuron over their own duration, so
+    # each half's mean rate is a per-neuron rate in Hz.
+    assert first >= 0.0 and second >= 0.0
