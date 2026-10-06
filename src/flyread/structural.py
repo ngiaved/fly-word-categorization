@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .network import SimulationNetwork
+from .network import PlasticSynapses, SimulationNetwork
 from .repro import make_rng
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +57,10 @@ class StructuralStats:
     silences: int = 0
     recruits: int = 0
     pruned_total: int = 0
+    # Prunes that landed on recruited-reserve synapses rather than the measured
+    # plastic pathway. Kept separate so the recessive pruning budget can be
+    # tracked against the number of recruited neurons.
+    expansion_pruned_total: int = 0
     silenced_total: int = 0
     reserve_available: int = 0
     reserve_warning_logged: bool = False
@@ -72,6 +76,7 @@ class StructuralStats:
             "silences": self.silences,
             "recruits": self.recruits,
             "pruned_total": self.pruned_total,
+            "expansion_pruned_total": self.expansion_pruned_total,
             "silenced_total": self.silenced_total,
             "reserve_available": self.reserve_available,
             "reserve_warning_logged": self.reserve_warning_logged,
@@ -107,6 +112,17 @@ class StructuralPlasticity:
         self.silence_window = int(config.get("structural.silence_window_trials"))
         self.recruit_every = int(config.get("structural.recruit_every_n_checks"))
         self.recruit_noise = float(config.get("structural.recruit_noise"))
+        # Pruning threshold as a fraction of each synapse's own initial weight.
+        # Scale-independent, so it bites in the calibrated regime where absolute
+        # magnitudes are ~1 rather than ~0.01.
+        self.prune_weight_ratio = float(
+            config.get("structural.prune_weight_ratio", 0.0)
+        )
+        # Deletion target: pruned synapses per recruited neuron. 0.5 means
+        # deletions track half of additions.
+        self.prune_per_recruit = float(
+            config.get("structural.prune_per_recruit", 0.0)
+        )
         self.max_prunes = int(config.get("structural.max_prunes_per_interval"))
         self.max_silences = int(config.get("structural.max_silences_per_interval"))
         self.max_recruits = int(config.get("structural.max_recruits_per_interval"))
@@ -126,29 +142,81 @@ class StructuralPlasticity:
         self._silent_neurons: set[int] = set()
         self._recruited = 0
         self.stats.reserve_available = int(network.reserve.N)
+        # Per-synapse consecutive-below-threshold counters for the recruited
+        # reserve synapse set, kept separate from the measured set's counters.
+        self._expansion_below_count: np.ndarray | None = None
+        # Readout categories. Recruited reserve neurons join these as extra
+        # readout units, assigned round-robin, so a new neuron contributes to
+        # one category's spike total.
+        self.n_categories = int(len(network.output_indices)) or 1
 
         self._reserve_stage = self._make_reserve_stage()
+        self._reserve_stage_attached = False
         self._rng = make_rng(self.seed, stream="structural")
 
     # -- reserve pool ---------------------------------------------------
     def _make_reserve_stage(self):
-        """A Synapses object the reserve neurons can be connected through later."""
+        """The plastic ``upstream -> reserve`` synapse set for recruited neurons.
+
+        This is the plasticity locus for recruited neurons: it carries the same
+        eligibility trace as the measured ``mushroom_body -> output`` pair, so
+        dopamine reshapes a new neuron's input weights exactly as it reshapes
+        the measured readout. Recruited neurons are counted in the readout, so
+        they are full output units rather than inert wiring.
+        """
         import brian2 as b2
 
         source_stage = self._upstream_stage()
         if source_stage is None:
             return None
         source = self.network.stages[source_stage].group
-        syn = b2.Synapses(
-            source, self.network.reserve,
-            model="w : 1", on_pre="I_syn += w", method="euler",
-            namespace={"v_rest": 0.0},
+
+        trace_tau = float(self.config.get("learning.trace_tau_ms"))
+        trace_increment = float(self.config.get("learning.trace_increment"))
+        std_tau = float(self.config.get("network.short_term_depression.tau_ms", 50.0))
+        std_use = float(self.config.get("network.short_term_depression.use", 0.3))
+
+        # Mirror the measured plastic pair exactly: the same eligibility trace
+        # and the same short-term depression variable, so a recruited neuron's
+        # input drive and plasticity dynamics match the measured readout.
+        model = (
+            "w : 1\n"
+            "delig/dt = -elig/trace_tau : 1 (clock-driven)\n"
+            "du/dt = (u_rest - u)/tau_u : 1 (clock-driven)"
         )
-        # The reserve pool is born unconnected. Brian2 refuses to run a
-        # Synapses object with no connections, so it starts inactive and is
-        # enabled by the first recruitment that connects it.
+        namespace = {
+            "trace_tau": trace_tau * b2.ms,
+            "trace_inc": trace_increment,
+            "tau_u": max(std_tau, 1.0) * b2.ms,
+            "u_rest": 1.0,
+            "use": std_use,
+        }
+
+        syn = b2.Synapses(
+            source, self.network.reserve, model=model,
+            on_pre="I_syn += w * u\nelig += trace_inc\nu -= use",
+            on_post="elig += trace_inc",
+            method="euler", namespace={**namespace, "v_rest": 0.0},
+        )
+        # The reserve pool is born unconnected, and Brian2 refuses to run an
+        # empty Synapses object. It is therefore NOT added to the Brian network
+        # here; the first recruitment connects it and attaches it (see
+        # _recruit). Merely flipping `active` after adding was not enough,
+        # because the network had already snapshotted the synapse list.
         syn.active = False
-        self.network.brian.add(syn)
+
+        expansion = PlasticSynapses(
+            pre_indices=np.array([], dtype=np.int64),
+            post_indices=np.array([], dtype=np.int64),
+            role_pair=f"{source_stage}->reserve",
+            weights=np.array([], dtype=np.float64),
+            initial_weights=np.array([], dtype=np.float64),
+            trace=np.array([], dtype=np.float64),
+            active=np.array([], dtype=bool),
+            n_synapses_each=np.array([], dtype=np.int64),
+        )
+        self.network.expansion_plastic = expansion
+        self.network.expansion_syn = syn
         return syn
 
     def _upstream_stage(self) -> str | None:
@@ -196,13 +264,19 @@ class StructuralPlasticity:
         return self.step(trial)
 
     def step(self, trial: int) -> list[StructuralEvent]:
-        """One structural interval: prune, then silence, then maybe recruit."""
+        """One structural interval: prune, then silence, then maybe recruit.
+
+        Recruitment runs before the reserve-pruning pass so a neuron recruited
+        this interval can have its synapses reclaimed by a later interval; the
+        consecutive-check rule keeps it from being pruned on first sight.
+        """
         self.stats.intervals += 1
         produced: list[StructuralEvent] = []
         produced.extend(self._prune(trial))
         produced.extend(self._silence(trial))
         if self.recruit_every > 0 and self.stats.intervals % self.recruit_every == 0:
             produced.extend(self._recruit(trial))
+        produced.extend(self._prune_expansion(trial))
         self.events.extend(produced)
         return produced
 
@@ -272,6 +346,84 @@ class StructuralPlasticity:
                 },
             ))
         LOGGER.info("trial %d: pruned %d synapses", trial, chosen.size)
+        return events
+
+    # -- recruitment pruning --------------------------------------------
+    def _prune_expansion(self, trial: int) -> list[StructuralEvent]:
+        """Prune recruited-reserve synapses below a fraction of their own
+        initial weight, budgeted so deletions track a fraction of additions.
+
+        The measured plastic pathway is tiny (~200 synapses in the calibrated
+        network), so removing "half the added neurons" cannot be expressed as a
+        fraction of it. Instead the reserve synapses are prunable and are
+        budgeted against the number of recruited neurons: once ``recruits``
+        neurons have been added, up to ``prune_per_recruit * recruits`` of
+        their input synapses are reclaimed. A recruited neuron whose input
+        synapses are all reclaimed is effectively deleted.
+        """
+        expansion = self.network.expansion_plastic
+        if expansion is None or expansion.weights.size == 0:
+            return []
+        if self.prune_per_recruit <= 0.0 or self.prune_weight_ratio <= 0.0:
+            return []
+
+        weights = expansion.weights
+        active = expansion.active
+        threshold = self.prune_weight_ratio * expansion.initial_weights
+        below_mask = (weights < threshold) & active
+        below = np.flatnonzero(below_mask)
+        self.stats.candidate_totals["prune_reserve"] = int(below.size)
+
+        if self._expansion_below_count is None or (
+            len(self._expansion_below_count) != weights.size
+        ):
+            self._expansion_below_count = np.zeros(weights.size, dtype=np.int64)
+        self._expansion_below_count[below] += 1
+        self._expansion_below_count[~below_mask] = 0
+
+        if self.prune_checks > 0:
+            eligible = np.flatnonzero(
+                (self._expansion_below_count >= self.prune_checks) & active
+            )
+        else:
+            eligible = below
+        if eligible.size == 0:
+            return []
+
+        target = int(np.floor(self.prune_per_recruit * self._recruited))
+        remaining = target - self.stats.expansion_pruned_total
+        if remaining <= 0:
+            return []
+
+        chosen = self._cap(
+            eligible, self.max_prunes, remaining, self.stats, "prune"
+        )
+        if chosen.size == 0:
+            return []
+
+        weights_before = weights[chosen].copy()
+        weights[chosen] = 0.0
+        active[chosen] = False
+        self._reserve_stage.w = weights.tolist()
+        self.stats.prunes += int(chosen.size)
+        self.stats.pruned_total += int(chosen.size)
+        self.stats.expansion_pruned_total += int(chosen.size)
+        events = []
+        for position, synapse_id in enumerate(chosen.tolist()):
+            events.append(StructuralEvent(
+                trial=trial, kind=PRUNE,
+                detail={
+                    "synapse_id": int(synapse_id),
+                    "set": "reserve",
+                    "pre_index": int(expansion.pre_indices[synapse_id]),
+                    "post_index": int(expansion.post_indices[synapse_id]),
+                    "weight_before": float(weights_before[position]),
+                    "weight_after": 0.0,
+                    "threshold_ratio": self.prune_weight_ratio,
+                    "consecutive_checks": self.prune_checks,
+                },
+            ))
+        LOGGER.info("trial %d: pruned %d reserve synapses", trial, chosen.size)
         return events
 
     # -- silencing ------------------------------------------------------
@@ -396,23 +548,28 @@ class StructuralPlasticity:
         source_stage, pool = self._source_pool()
         if source_stage is None or pool.size == 0:
             LOGGER.info(
-                "trial %d: no upstream neurons carry an active plastic synapse; "
+                "trial %d: no upstream neurons are available as sources; "
                 "cannot recruit", trial,
             )
             return []
 
-        # Population the new neurons are drawn to resemble: the weights and the
-        # per-neuron synapse counts of the existing ACTIVE plastic synapses.
-        # New neurons are NOT clones of a template -- each draws its own random
-        # sources and bootstraps its weights from this population, so their
-        # weight mean/spread and fan-in match the population by construction.
-        active = self.plastic.active
-        population_weights = self.plastic.weights[active]
+        # Population the new neurons are drawn to resemble: the fan-in and the
+        # INITIAL synaptic weights of the measured plastic pathway. New neurons
+        # are NOT clones of a template -- each draws its own random sources and
+        # bootstraps its weights from this population, so their weight
+        # mean/spread and fan-in match it by construction. The initial weights
+        # are used rather than the current ones so recruitment does not inherit
+        # a collapsed (all-zero) population and wire up dead neurons.
+        population_weights = np.asarray(
+            self.plastic.initial_weights, dtype=np.float64
+        )
         if population_weights.size == 0:
-            LOGGER.info("trial %d: no active plastic weights to match", trial)
+            population_weights = self.plastic.weights
+        if population_weights.size == 0:
+            LOGGER.info("trial %d: no plastic weights to match", trial)
             return []
         post_counts = np.bincount(
-            self.plastic.post_indices[active],
+            self.plastic.post_indices,
             minlength=int(self.plastic.post_indices.max()) + 1
             if self.plastic.post_indices.size else 1,
         )
@@ -451,14 +608,50 @@ class StructuralPlasticity:
                 j=[reserve_local] * n_syn,
             )
             self._reserve_stage.active = True
+            if not self._reserve_stage_attached:
+                # The reserve synapse is connected for the first time; attach it
+                # to the Brian network so it actually runs and accumulates the
+                # eligibility trace that dopamine reads.
+                self.network.brian.add(self._reserve_stage)
+                self._reserve_stage_attached = True
             start = len(self._reserve_stage) - n_syn
             self._reserve_stage.w[start:] = new_weights.tolist()
+
+            # Track the new synapses in the expansion plastic set so dopamine
+            # can shape them and pruning can reclaim them.
+            expansion = self.network.expansion_plastic
+            expansion.pre_indices = np.concatenate(
+                [expansion.pre_indices, sources.astype(np.int64)]
+            )
+            expansion.post_indices = np.concatenate(
+                [expansion.post_indices,
+                 np.full(n_syn, reserve_local, dtype=np.int64)]
+            )
+            expansion.weights = np.concatenate(
+                [expansion.weights, new_weights.astype(np.float64)]
+            )
+            expansion.initial_weights = np.concatenate(
+                [expansion.initial_weights, new_weights.astype(np.float64)]
+            )
+            expansion.trace = np.concatenate(
+                [expansion.trace, np.zeros(n_syn, dtype=np.float64)]
+            )
+            expansion.active = np.concatenate(
+                [expansion.active, np.ones(n_syn, dtype=bool)]
+            )
+            expansion.n_synapses_each = np.concatenate(
+                [expansion.n_synapses_each,
+                 np.full(n_syn, 1, dtype=np.int64)]
+            )
+
+            category = int(reserve_local % self.n_categories)
             self._recruited += 1
             events.append(StructuralEvent(
                 trial=trial, kind=RECRUIT,
                 detail={
                     "source_stage": source_stage,
                     "new_neuron_index": int(reserve_local),
+                    "readout_category": category,
                     "n_synapses": int(n_syn),
                     "source_indices": [int(s) for s in sources],
                     "noise": self.recruit_noise,
@@ -477,20 +670,24 @@ class StructuralPlasticity:
         return events
 
     def _source_pool(self) -> tuple[str | None, np.ndarray]:
-        """Upstream neurons that carry at least one ACTIVE plastic synapse.
+        """Upstream neurons that can serve as presynaptic sources for recruits.
 
-        Recruitment draws presynaptic sources from this pool, so a new neuron
-        is wired only to neurons that are already part of the functioning
-        plastic pathway. Returns the stage name and the sorted local indices.
+        The pool is every upstream neuron that already participates in the
+        plastic pathway: the presynaptic side of the measured plastic synapses
+        plus the presynaptic side of synapses created by earlier recruits. It
+        intentionally ignores synapse activity so recruitment survives after
+        measured synapses have been pruned away. Returns the stage name and the
+        sorted local indices.
         """
         stage = self._upstream_stage()
         if stage is None:
             return None, np.array([], dtype=np.int64)
-        active = self.plastic.active
-        if active.size == 0 or not active.any():
-            return stage, np.array([], dtype=np.int64)
+        parts = [self.plastic.pre_indices]
+        expansion = getattr(self.network, "expansion_plastic", None)
+        if expansion is not None and expansion.pre_indices.size:
+            parts.append(expansion.pre_indices)
+        pool = np.unique(np.concatenate(parts))
         n_up = int(self.network.stages[stage].n)
-        pool = np.unique(self.plastic.pre_indices[active])
         pool = pool[(pool >= 0) & (pool < n_up)]
         return stage, pool.astype(np.int64)
 
@@ -570,12 +767,20 @@ class StructuralPlasticity:
                 "size": int(self.network.reserve.N),
                 "recruited": self._recruited,
                 "available": self.reserve_available,
+                "readout_units": self._recruited,
+                "prune_target": int(
+                    np.floor(self.prune_per_recruit * self._recruited)
+                ),
+                "expansion_synapses": int(
+                    self.network.expansion_plastic.weights.size
+                    if self.network.expansion_plastic is not None else 0
+                ),
             },
             "note": (
                 "Exploratory mechanism with no published precedent. Recruited "
-                "reserve neurons receive pseudorandom population-matched "
-                "synapses but are not part "
-                "of the plastic output synapse set, so they cannot change the "
-                "readout until a later change extends the plasticity rules."
+                "reserve neurons are wired with pseudorandom population-matched "
+                "plastic mushroom_body input and counted in the readout, so they "
+                "are full output units. Deletions are reserve-synapse prunes "
+                "budgeted at prune_per_recruit per recruited neuron."
             ),
         }

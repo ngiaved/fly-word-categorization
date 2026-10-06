@@ -136,37 +136,31 @@ class PlasticityStats:
         }
 
 
-def apply_dopamine(
-    network: SimulationNetwork,
-    config,
+def _update_plastic_set(
+    plastic,
+    syn,
+    signs: np.ndarray | None,
     dopamine: float,
-    stats: PlasticityStats | None = None,
+    config,
+    rate: float,
+    relative: bool,
+    stats: PlasticityStats | None,
 ) -> dict[str, Any]:
-    """Apply one dopamine-gated weight update to the plastic synapse set.
+    """One dopamine-gated update to a single plastic synapse set.
 
-    Only synapses that are still active (not pruned, not silenced) are updated.
-
-    Weights are clipped to ``learning.w_min`` / ``learning.w_max``, which are
-    nonnegative, so a weight is a synaptic MAGNITUDE and the excitatory or
-    inhibitory character of the synapse lives in ``synapse_signs``. The
-    magnitude is converted back to a signed current before it reaches
-    ``I_syn``, otherwise clipping inhibitory synapses at zero would silently
-    turn every one of them excitatory.
+    ``signs`` carries the excitatory/inhibitory character of each synapse; the
+    tracked ``plastic.weights`` are always nonnegative magnitudes so
+    ``w_min``/``w_max`` clipping can never flip an inhibitory synapse to
+    excitatory. Pass ``signs=None`` for a purely excitatory set (the recruited
+    reserve input), where the magnitude is the signed current.
     """
-    if dopamine == 0.0:
-        return {"changed": 0, "dopamine": 0.0}
-    if not config.get("learning.enabled"):
-        return {"changed": 0, "dopamine": dopamine, "skipped": "learning disabled"}
-
-    plastic = network.plastic
-    syn = network.synaptic_groups[plastic.role_pair]
-
     trace = np.asarray(syn.elig[:], dtype=np.float64)
     active = plastic.active
     if stats is not None:
-        stats.trace_max = max(stats.trace_max, float(trace.max()) if trace.size else 0.0)
+        stats.trace_max = max(
+            stats.trace_max, float(trace.max()) if trace.size else 0.0
+        )
 
-    rate = float(config.get("learning.learning_rate"))
     before = plastic.weights.copy()
     delta = rate * float(dopamine) * trace * active
     # Bounds are relative to the INITIAL synaptic weight, not absolute. The
@@ -180,7 +174,7 @@ def apply_dopamine(
     initial = np.asarray(
         getattr(plastic, "initial_weights", plastic.weights), dtype=np.float64
     )
-    if config.get("learning.relative_bounds", True):
+    if relative:
         lo = initial * float(config.get("learning.w_min_ratio", 0.0))
         hi = initial * float(config.get("learning.w_max_ratio", 2.0))
         updated = np.clip(before + delta, np.minimum(lo, hi), np.maximum(lo, hi))
@@ -192,14 +186,12 @@ def apply_dopamine(
 
     plastic.weights = updated
     plastic.trace = trace
-    signs = network.synapse_signs.get(plastic.role_pair)
-    if signs is None:
-        raise LearningError(
-            f"no sign vector recorded for plastic role pair {plastic.role_pair!r}"
-        )
     # Store the signed current on the synapse; keep the nonnegative magnitude in
     # plastic.weights so w_min/w_max, pruning, and reporting stay well defined.
-    syn.w = (np.asarray(signs, dtype=np.float64) * updated).tolist()
+    if signs is None:
+        syn.w = updated.tolist()
+    else:
+        syn.w = (np.asarray(signs, dtype=np.float64) * updated).tolist()
 
     if stats is not None:
         stats.updates += 1
@@ -213,8 +205,61 @@ def apply_dopamine(
 
     return {
         "changed": int(np.count_nonzero(delta)),
-        "dopamine": float(dopamine),
         "max_abs_delta": float(np.abs(delta).max()) if delta.size else 0.0,
+    }
+
+
+def apply_dopamine(
+    network: SimulationNetwork,
+    config,
+    dopamine: float,
+    stats: PlasticityStats | None = None,
+) -> dict[str, Any]:
+    """Apply one dopamine-gated weight update to every plastic synapse set.
+
+    The measured mushroom_body -> output set and, once structural plasticity
+    has recruited reserve neurons, the mushroom_body -> reserve expansion set
+    are both shaped by the same three-factor signal. Only synapses that are
+    still active (not pruned, not silenced) are updated.
+    """
+    if dopamine == 0.0:
+        return {"changed": 0, "dopamine": 0.0}
+    if not config.get("learning.enabled"):
+        return {"changed": 0, "dopamine": dopamine, "skipped": "learning disabled"}
+
+    rate = float(config.get("learning.learning_rate"))
+    relative = bool(config.get("learning.relative_bounds", True))
+
+    plastic = network.plastic
+    syn = network.synaptic_groups[plastic.role_pair]
+    signs = network.synapse_signs.get(plastic.role_pair)
+    if signs is None:
+        raise LearningError(
+            f"no sign vector recorded for plastic role pair {plastic.role_pair!r}"
+        )
+    info = _update_plastic_set(
+        plastic, syn, signs, dopamine, config, rate, relative, stats
+    )
+    changed = info["changed"]
+    max_delta = info["max_abs_delta"]
+
+    expansion = getattr(network, "expansion_plastic", None)
+    esyn = getattr(network, "expansion_syn", None)
+    if expansion is not None and esyn is not None and expansion.weights.size:
+        # Recruited reserve synapses are purely excitatory, so no sign vector is
+        # needed. They are updated with the same dopamine but kept out of the
+        # measured-pathway stats so existing plasticity counters keep their
+        # meaning.
+        expansion_info = _update_plastic_set(
+            expansion, esyn, None, dopamine, config, rate, relative, None
+        )
+        changed += expansion_info["changed"]
+        max_delta = max(max_delta, expansion_info["max_abs_delta"])
+
+    return {
+        "changed": changed,
+        "dopamine": float(dopamine),
+        "max_abs_delta": max_delta,
     }
 
 
@@ -310,6 +355,8 @@ class TrialRunner:
             name: b2.SpikeMonitor(group.group, record=False)
             for name, group in self.network.stages.items()
         }
+        # Reserve neurons are monitored too: recruited ones are readout units.
+        monitors["reserve"] = b2.SpikeMonitor(self.network.reserve, record=False)
         self.network.brian.add(list(monitors.values()))
         self._monitors = monitors
         # Precomputed output index -> (stage, local index) lookup.
@@ -379,6 +426,18 @@ class TrialRunner:
         for position, internal in enumerate(self.network.output_indices):
             stage, local = self._output_locations[int(internal)]
             counts[position] = int(window[stage][local])
+
+        # Recruited reserve neurons are readout units. Each is assigned a
+        # category round-robin at recruitment, so its spikes add to that
+        # category's total and it can change the argmax readout.
+        expansion = getattr(self.network, "expansion_plastic", None)
+        if expansion is not None and expansion.post_indices.size:
+            recruited = int(expansion.post_indices.max()) + 1
+            reserve_counts = window.get("reserve")
+            if reserve_counts is not None:
+                n_categories = counts.size
+                for unit in range(min(recruited, int(reserve_counts.size))):
+                    counts[unit % n_categories] += int(reserve_counts[unit])
 
         # Snapshot per-stage rates while the counts still hold stimulus-time
         # spikes only; the window baseline keeps them from including history.
@@ -602,11 +661,21 @@ class TrialRunner:
         syn = self.network.synaptic_groups[plastic.role_pair]
         syn.elig = 0.0
         plastic.trace = np.zeros_like(plastic.trace)
+        # Recruited reserve neurons carry their own plastic set; reset it too so
+        # eligibility does not leak across trials.
+        expansion = getattr(self.network, "expansion_plastic", None)
+        esyn = getattr(self.network, "expansion_syn", None)
+        if expansion is not None and esyn is not None and len(esyn) > 0:
+            esyn.elig = 0.0
+            expansion.trace = np.zeros_like(expansion.trace)
         # Release probability is a documented per-trial baseline, not carried
         # over: a synapse left depleted from the previous word would bias the
         # next word's response toward whatever it was used for.
         if bool(self.config.get("network.short_term_depression.enabled", True)):
-            for group in self.network.synaptic_groups.values():
+            groups = list(self.network.synaptic_groups.values())
+            if esyn is not None and len(esyn) > 0:
+                groups.append(esyn)
+            for group in groups:
                 if "u" in group.variables:
                     group.u = 1.0
 

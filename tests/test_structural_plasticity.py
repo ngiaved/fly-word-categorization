@@ -5,7 +5,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from flyread import config, connectome, network as net, structural
+from flyread import config, connectome, learning, network as net, structural
 
 
 def _config(**overrides):
@@ -251,6 +251,67 @@ def test_ablation_switch_disables_all_structural_change():
     assert not events, "a disabled structural step must produce no events"
     assert sp.stats.intervals == 0
     assert sp.summary()["n_events"] == 0
+
+
+def test_recruited_readout_units_have_plastic_input():
+    # Recruited reserve neurons must be full readout units: their input is a
+    # dopamine-shaped plastic set, not inert wiring.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "2",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+    sp.set_trial_duration(0.06)
+
+    events = [e for e in sp.step(trial=10) if e.kind == "recruit"]
+    assert events, "recruitment must occur"
+    assert all("readout_category" in e.detail for e in events), (
+        "recruit events must record the readout category each neuron joins"
+    )
+
+    expansion = built.expansion_plastic
+    assert expansion is not None and expansion.weights.size > 0
+    assert built.expansion_syn is not None
+    assert expansion.role_pair.endswith("->reserve")
+
+    # Dopamine must reshape the recruited input weights.
+    built.expansion_syn.elig[:] = 1.0
+    before = expansion.weights.copy()
+    learning.apply_dopamine(built, cfg, 1.0, None)
+    assert not np.allclose(expansion.weights, before), (
+        "dopamine must shape the recruited neurons' plastic input"
+    )
+
+
+def test_reserve_pruning_tracks_fraction_of_recruits():
+    # Deletions (reserve-synapse prunes) are budgeted at prune_per_recruit per
+    # recruited neuron, so they track a fraction of additions.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "6",
+        "structural.prune_per_recruit": "0.5",
+        "structural.prune_weight_ratio": "0.5",
+        "structural.prune_consecutive_checks": "1",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=2)
+    sp.set_trial_duration(0.06)
+
+    sp.step(trial=1)
+    recruited = sp.stats.recruits
+    assert recruited > 0, "must recruit before pruning can track additions"
+    target = int(np.floor(0.5 * recruited))
+
+    expansion = built.expansion_plastic
+    for trial in range(2, 12):
+        expansion.weights[:] = 0.0  # every reserve synapse is now "weak"
+        sp.step(trial=trial)
+
+    assert sp.stats.expansion_pruned_total == target, (
+        f"pruned {sp.stats.expansion_pruned_total} reserve synapses, "
+        f"expected {target} (half of {recruited} recruits)"
+    )
 
 
 def test_on_and_off_differ_only_in_structural_events():

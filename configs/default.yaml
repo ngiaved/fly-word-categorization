@@ -474,6 +474,14 @@ structural:
   # Pruning: weight below threshold for N consecutive checks.
   prune_weight_threshold: 0.01
   prune_consecutive_checks: 2
+  # Prune a recruited-reserve synapse when its magnitude falls below this
+  # fraction of its own initial value. Scale-independent, unlike the absolute
+  # threshold above.
+  prune_weight_ratio: 0.1
+  # Deletion target: reserve synapses pruned per recruited neuron. 0.5 makes
+  # deletions track half of additions; a recruited neuron whose input synapses
+  # are pruned is effectively deleted.
+  prune_per_recruit: 0.5
   # Silencing: mean rate below threshold (Hz) over a window of trials.
   silence_rate_threshold_hz: 0.1
   silence_window_trials: 50

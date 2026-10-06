@@ -125,6 +125,13 @@ class SimulationNetwork:
     noise: dict = field(default_factory=dict)
     # Role pairs built from the synthetic lobula -> Kenyon cell bridge.
     artificial_role_pairs: list[str] = field(default_factory=list)
+    # Structural expansion: the plastic mushroom_body -> reserve synapse set
+    # that recruited reserve neurons live on. It is created lazily by
+    # StructuralPlasticity (the reserve pool is owned there), not by
+    # build_network, and is dopamine-shaped exactly like the measured plastic
+    # set so recruited neurons are real readout units rather than inert wiring.
+    expansion_plastic: Any = None
+    expansion_syn: Any = None
 
     # -- reporting -------------------------------------------------------
     def stage_sizes(self) -> dict[str, int]:

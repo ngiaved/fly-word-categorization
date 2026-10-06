@@ -49,9 +49,10 @@ Task 0 gate passes or scope is formally revised.
 ## 6. Structural plasticity
 - [ ] 6.1 Synaptic pruning with consecutive-check rule [structural-plasticity]
 - [ ] 6.2 Neuron silencing by activity window [structural-plasticity]
-- [ ] 6.3 Recruitment from reserve pool using pseudorandom population-matched synapses [structural-plasticity]
+- [ ] 6.3 Recruitment from reserve pool using pseudorandom population-matched synapses, wired as plastic readout units [structural-plasticity]
 - [ ] 6.4 Per-interval and total change caps [structural-plasticity]
 - [ ] 6.5 Event log and on/off ablation switch [structural-plasticity]
+- [ ] 6.6 Prune recruited-reserve synapses so deletions track a configured fraction of additions [structural-plasticity]
 
 ## 7. Evaluation
 - [ ] 7.1 Seeded train/test split (15/5 per category) [evaluation]

@@ -47,11 +47,33 @@ rather than cloning a single template neuron.
 - AND its weight distribution matches the population (same mean and spread)
 - AND the event is logged with trial number and new neuron ID
 
+#### Scenario: Recruited neuron is a readout unit
+- GIVEN a recruited reserve neuron
+- WHEN a stimulus is presented
+- THEN its incoming mushroom_body synapses are part of a dopamine-shaped
+  plastic set
+- AND its spikes are counted toward its assigned readout category
+- AND winning the readout can change the network's prediction
+
 #### Scenario: Reserve exhausted
 - GIVEN no reserve neurons remain
 - WHEN the growth rule triggers
 - THEN no recruitment occurs
 - AND a warning is logged once
+
+### Requirement: Recruitment deletion balance
+The system SHALL prune recruited-reserve synapses so that deletions track a
+configured fraction of additions, keeping the recruited population from
+growing without bound.
+
+#### Scenario: Prune tracks additions
+- GIVEN recruited reserve neurons carrying plastic input synapses
+- AND a configured deletions-per-recruit ratio
+- WHEN a reserve synapse's magnitude stays below a configured fraction of its
+  own initial value for the required consecutive checks
+- THEN it is pruned up to the ratio-budgeted target
+- AND the prune is logged with its trial number and the reserve set it belongs
+  to
 
 ### Requirement: Rate limits and safety
 The system SHALL cap the number of structural changes per check interval and
