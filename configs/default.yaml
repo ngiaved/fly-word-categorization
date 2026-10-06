@@ -477,11 +477,13 @@ structural:
   # Silencing: mean rate below threshold (Hz) over a window of trials.
   silence_rate_threshold_hz: 0.1
   silence_window_trials: 50
-  # Recruitment: how often to attempt growth, and how much to clone.
+  # Recruitment: how often to attempt growth. New neurons are not clones of
+  # a template: each draws pseudorandom presynaptic sources from the upstream
+  # pool and weights bootstrapped from the population of existing plastic
+  # synapses, so their weight mean/spread match the population.
   # Every check recruits; over a 600-trial run (24 checks) at ~45 per check
   # the reserve fills to its 1,000-neuron cap.
   recruit_every_n_checks: 1
-  recruit_weight_fraction: 0.2
   recruit_noise: 0.05
   # Rate limits.
   max_prunes_per_interval: 64

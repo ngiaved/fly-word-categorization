@@ -100,8 +100,9 @@ def test_silence_disables_synapses_and_logs():
     assert events[0].trial == 10
 
 
-def test_recruit_connects_reserve_with_cloned_weak_weights():
-    # Requirement: Neuron recruitment -- weak cloned synapses from a template
+def test_recruit_connects_reserve_with_population_matched_weights():
+    # Requirement: Neuron recruitment -- pseudorandom sources, weights that
+    # track the population (not clones of a single template)
     cfg = _config(**{
         "structural.recruit_every_n_checks": "1",
         "structural.max_recruits_per_interval": "1",
@@ -113,23 +114,34 @@ def test_recruit_connects_reserve_with_cloned_weak_weights():
     events = [e for e in sp.step(trial=10) if e.kind == "recruit"]
     assert events, "recruitment must occur when the reserve has capacity"
     detail = events[0].detail
-    for key in ("template_stage", "template_index", "new_neuron_index",
-                "n_synapses", "weight_fraction"):
+    for key in ("source_stage", "new_neuron_index", "n_synapses",
+                "source_indices", "population_mean_weight",
+                "population_std_weight"):
         assert key in detail, f"recruit event must record {key}"
     assert events[0].trial == 10
 
     assert len(sp._reserve_stage) > 0, "reserve stage must gain synapses"
-    # the source index must address the template neuron in the source group
-    source_group = built.stages[detail["template_stage"]].group
-    for pre in np.asarray(sp._reserve_stage.i[:]).tolist():
+    # every presynaptic source must address the upstream source group
+    source_group = built.stages[detail["source_stage"]].group
+    source_indices = detail["source_indices"]
+    assert len(source_indices) == detail["n_synapses"]
+    assert len(set(source_indices)) == len(source_indices), (
+        "sources must be distinct"
+    )
+    for pre in source_indices:
         assert 0 <= pre < int(source_group.N), (
             f"presynaptic index {pre} outside source group of size "
             f"{int(source_group.N)}"
         )
-    # weights must be weaker than the template they were cloned from
-    assert float(np.max(np.asarray(sp._reserve_stage.w[:]))) < float(
-        np.max(built.plastic.weights)
-    )
+    # weights are bootstrapped from the population, so their mean must be in
+    # the same ballpark as the population mean (not scaled down by a fraction)
+    population_mean = detail["population_mean_weight"]
+    assert float(np.mean(np.asarray(sp._reserve_stage.w[:]))) == detail[
+        "mean_weight"
+    ]
+    assert abs(detail["mean_weight"] - population_mean) <= 3.0 * abs(
+        population_mean
+    ) + 1e-6
 
 
 def test_recruited_reserve_neurons_can_spike():

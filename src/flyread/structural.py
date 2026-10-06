@@ -106,7 +106,6 @@ class StructuralPlasticity:
         self.silence_threshold = float(config.get("structural.silence_rate_threshold_hz"))
         self.silence_window = int(config.get("structural.silence_window_trials"))
         self.recruit_every = int(config.get("structural.recruit_every_n_checks"))
-        self.recruit_fraction = float(config.get("structural.recruit_weight_fraction"))
         self.recruit_noise = float(config.get("structural.recruit_noise"))
         self.max_prunes = int(config.get("structural.max_prunes_per_interval"))
         self.max_silences = int(config.get("structural.max_silences_per_interval"))
@@ -394,31 +393,32 @@ class StructuralPlasticity:
         if n_new <= 0:
             return []
 
-        template = self._pick_template()
-        if template is None:
-            return []
-        template_stage, template_local = template
-        pre_rows = self._synapse_rows_for_pre(template_local)
-
-        if pre_rows.size == 0:
-            LOGGER.info("trial %d: template neuron has no plastic inputs to clone", trial)
-            return []
-
-        n_syn = min(len(pre_rows), 8)
-        pre_rows = pre_rows[:n_syn]
-        template_weights = self.plastic.weights[pre_rows]
-        # ``pre_rows`` indexes the plastic weight array, NOT the source
-        # NeuronGroup. The presynaptic neuron is the template itself, so the
-        # source index for every cloned synapse is the template's local index.
-        source_local = int(template_local)
-        source_group = self.network.stages[template_stage].group
-        if not 0 <= source_local < int(source_group.N):
-            LOGGER.warning(
-                "trial %d: template local index %d is outside source group of "
-                "size %d; skipping recruitment",
-                trial, source_local, int(source_group.N),
+        source_stage, pool = self._source_pool()
+        if source_stage is None or pool.size == 0:
+            LOGGER.info(
+                "trial %d: no upstream neurons carry an active plastic synapse; "
+                "cannot recruit", trial,
             )
             return []
+
+        # Population the new neurons are drawn to resemble: the weights and the
+        # per-neuron synapse counts of the existing ACTIVE plastic synapses.
+        # New neurons are NOT clones of a template -- each draws its own random
+        # sources and bootstraps its weights from this population, so their
+        # weight mean/spread and fan-in match the population by construction.
+        active = self.plastic.active
+        population_weights = self.plastic.weights[active]
+        if population_weights.size == 0:
+            LOGGER.info("trial %d: no active plastic weights to match", trial)
+            return []
+        post_counts = np.bincount(
+            self.plastic.post_indices[active],
+            minlength=int(self.plastic.post_indices.max()) + 1
+            if self.plastic.post_indices.size else 1,
+        )
+        post_counts = post_counts[post_counts > 0]
+        population_mean = float(population_weights.mean())
+        population_std = float(population_weights.std())
 
         events: list[StructuralEvent] = []
         for _offset in range(n_new):
@@ -433,26 +433,39 @@ class StructuralPlasticity:
                     trial, reserve_local, int(self.network.reserve.N),
                 )
                 return events
-            noise = 1.0 + self.recruit_noise * self._rng.standard_normal(pre_rows.size)
-            new_weights = template_weights * self.recruit_fraction * noise
+
+            # Fan-in: draw a synapse count from the population's per-neuron
+            # distribution, then pick that many DISTINCT presynaptic sources at
+            # random from the upstream pool (without replacement).
+            n_syn = int(self._rng.choice(post_counts)) if post_counts.size else 1
+            n_syn = max(1, min(n_syn, pool.size))
+            sources = self._rng.choice(pool, size=n_syn, replace=False)
+            # Weights: bootstrap from the population, then apply multiplicative
+            # noise, so the new neuron's weight statistics track the population.
+            base = self._rng.choice(population_weights, size=n_syn, replace=True)
+            noise = 1.0 + self.recruit_noise * self._rng.standard_normal(n_syn)
+            new_weights = np.clip(base * noise, 0.0, None)
+
             self._reserve_stage.connect(
-                i=[source_local] * len(pre_rows),
-                j=[reserve_local] * len(pre_rows),
+                i=sources.tolist(),
+                j=[reserve_local] * n_syn,
             )
             self._reserve_stage.active = True
-            start = len(self._reserve_stage) - len(pre_rows)
-            self._reserve_stage.w[start:] = np.clip(new_weights, 0.0, None).tolist()
+            start = len(self._reserve_stage) - n_syn
+            self._reserve_stage.w[start:] = new_weights.tolist()
             self._recruited += 1
             events.append(StructuralEvent(
                 trial=trial, kind=RECRUIT,
                 detail={
-                    "template_stage": template_stage,
-                    "template_index": int(template_local),
+                    "source_stage": source_stage,
                     "new_neuron_index": int(reserve_local),
-                    "n_synapses": int(len(pre_rows)),
-                    "weight_fraction": self.recruit_fraction,
+                    "n_synapses": int(n_syn),
+                    "source_indices": [int(s) for s in sources],
                     "noise": self.recruit_noise,
                     "mean_weight": float(np.mean(new_weights)),
+                    "std_weight": float(np.std(new_weights)),
+                    "population_mean_weight": population_mean,
+                    "population_std_weight": population_std,
                 },
             ))
         self.stats.recruits += n_new
@@ -463,39 +476,23 @@ class StructuralPlasticity:
         LOGGER.info("trial %d: recruited %d reserve neurons", trial, n_new)
         return events
 
-    def _synapse_rows_for_pre(self, local_index: int) -> np.ndarray:
-        """Plastic synapse rows whose presynaptic neuron is ``local_index``.
+    def _source_pool(self) -> tuple[str | None, np.ndarray]:
+        """Upstream neurons that carry at least one ACTIVE plastic synapse.
 
-        ``plastic.pre_indices`` are already DENSE LOCAL indices into the upstream
-        stage: ``network.build_network`` remaps every edge through the
-        per-stage local mapper before storing it, because Brian2 connects with
-        local indices. No subgraph translation is needed or wanted here.
+        Recruitment draws presynaptic sources from this pool, so a new neuron
+        is wired only to neurons that are already part of the functioning
+        plastic pathway. Returns the stage name and the sorted local indices.
         """
-        if not 0 <= local_index < self._upstream_n():
-            return np.array([], dtype=np.int64)
-        return np.flatnonzero(self.plastic.pre_indices == local_index)
-
-    def _upstream_n(self) -> int:
-        stage = self._upstream_stage()
-        return 0 if stage is None else self.network.stages[stage].n
-
-    def _pick_template(self) -> tuple[str, int] | None:
         stage = self._upstream_stage()
         if stage is None:
-            return None
-        group = self.network.stages[stage]
-        driven: list[int] = []
-        for local in range(group.n):
-            internal = int(group.indices[local])
-            if internal in self._silent_neurons:
-                continue
-            rows = self._synapse_rows_for_pre(local)
-            if rows.size and self.plastic.active[rows].any():
-                driven.append(local)
-        if not driven:
-            return None
-        choice = driven[int(self._rng.integers(0, len(driven)))]
-        return stage, choice
+            return None, np.array([], dtype=np.int64)
+        active = self.plastic.active
+        if active.size == 0 or not active.any():
+            return stage, np.array([], dtype=np.int64)
+        n_up = int(self.network.stages[stage].n)
+        pool = np.unique(self.plastic.pre_indices[active])
+        pool = pool[(pool >= 0) & (pool < n_up)]
+        return stage, pool.astype(np.int64)
 
     # -- helpers --------------------------------------------------------
     def _cap_count(self, count: int, stats: StructuralStats, kind: str) -> int:
@@ -576,7 +573,8 @@ class StructuralPlasticity:
             },
             "note": (
                 "Exploratory mechanism with no published precedent. Recruited "
-                "reserve neurons receive weak cloned synapses but are not part "
+                "reserve neurons receive pseudorandom population-matched "
+                "synapses but are not part "
                 "of the plastic output synapse set, so they cannot change the "
                 "readout until a later change extends the plasticity rules."
             ),

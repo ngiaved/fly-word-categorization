@@ -36,14 +36,16 @@ threshold over a configured window, by disconnecting them.
 - AND the event is logged
 
 ### Requirement: Neuron recruitment
-The system SHALL recruit reserve neurons by connecting them with weak
-synapses cloned, with noise, from a configured template neuron.
+The system SHALL recruit reserve neurons by connecting them with pseudorandom
+synapses whose sources and weights track the existing plastic population,
+rather than cloning a single template neuron.
 
 #### Scenario: Recruit from reserve
-- GIVEN an available reserve neuron and a template neuron
+- GIVEN an available reserve neuron and an active plastic population
 - WHEN the growth rule triggers
-- THEN the reserve neuron receives weak cloned synapses
-- AND the event is logged with trial number, template ID, and new neuron ID
+- THEN the reserve neuron receives synapses from pseudorandom upstream sources
+- AND its weight distribution matches the population (same mean and spread)
+- AND the event is logged with trial number and new neuron ID
 
 #### Scenario: Reserve exhausted
 - GIVEN no reserve neurons remain
