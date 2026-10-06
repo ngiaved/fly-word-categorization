@@ -256,7 +256,7 @@ network:
   # 7-of-8 inhibitory reinforcement -> output edges then clamp the readout
   # completely silent.
   artificial_bridge:
-    weight_ratio: 0.001
+    weight_ratio: 0.002
   # SYNTHETIC, same class of gap as `subcircuit.bridge` above: the selected
   # subcircuit has only 8 mushroom_body -> output edges drawing on 7 distinct
   # Kenyon cells out of 24, so 17 Kenyon cells have no path to the readout and
@@ -278,7 +278,7 @@ network:
   # self-exciting compartment that runs away carries no information about its
   # input, so its drive is a declared free parameter.
   mushroom_body_recurrent:
-    weight_ratio: 0.001
+    weight_ratio: 0.0001
   # Photoreceptor drive current per unit firing rate, in nA.
   input_gain_na: 0.002
   # Baseline input current for photoreceptors, in nA.
@@ -295,7 +295,7 @@ network:
   # so calibration's nonzero lower rate bound can never be met without it.
   # Keep it below v_threshold: spontaneous activity should arise from real
   # recurrent connectivity, not from injected noise.
-  background_dc_na: 0.2
+  background_dc_na: 0.0
   # Generic per-stage-pair gain, keyed "<pre>><post>", applied on top of any
   # special-cased pair above. The measured optic-lobe pairs cannot share one
   # scale: photoreceptor->lamina saturates at the refractory limit and destroys
@@ -340,8 +340,13 @@ calibration:
   # sits, and the injected noise weight sets the resulting spontaneous rate.
   # Without them no scale lands in the 0.5-15 Hz band, because the transition
   # from fully silent to saturated happens inside one grid step.
-  background_dc_grid: [0.0, 0.1, 0.25, 0.5]
-  noise_weight_grid: [0.0, 0.01, 0.05, 0.15, 0.3]
+  # `background_dc_grid` and `noise_weight_grid` are in CURRENT units, and
+  # with a restoring leak a neuron reaches `v_threshold` only when the
+  # drive exceeds `v_threshold / tau` = 1.0/0.02 = 50 nA. Grids in the
+  # sub-1 range could never reach threshold and calibration rejected
+  # every candidate.
+  background_dc_grid: [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
+  noise_weight_grid: [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
   simulated_ms: 300.0
   # Settling time excluded from the measurement, in ms.
   settle_ms: 50.0

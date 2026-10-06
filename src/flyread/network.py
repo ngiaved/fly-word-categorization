@@ -42,8 +42,25 @@ LOGGER = logging.getLogger(__name__)
 # ``connectome.neurotransmitter_signs``. It is therefore ADDED, so a positive
 # current depolarizes the postsynaptic neuron. Subtracting it would invert the
 # polarity of the whole network, making every excitatory connection inhibitory.
+# The membrane term must RESTORE v towards v_rest, i.e. it has to be
+# `-(v - v_rest)`, not `+(v - v_rest)`.
+#
+# With `+(v - v_rest)` the equation is anti-leak: its solution is
+# `v(t) = v_rest + (v0 - v_rest) * exp(t / tau)`, so any deviation from rest
+# GROWS exponentially instead of decaying. Measured consequence on release 783
+# with `v_rest = 0`: the first synapse onto an inhibited neuron drove it to
+# v = -5e17 (lamina), -8.9e14 (medulla) and -1.7e17 (mushroom_body), while
+# `I_syn` stayed at 5-39. Those enormous negative voltages then drove enormous
+# synaptic currents downstream, which is why the optic lobe sat at the
+# refractory limit and why saturating stages ignored every weight scale and
+# recurrence ratio tried (100x reductions changed nothing).
+#
+# The excitatory path hid this bug: a neuron starts at `v_rest = v_reset = 0`,
+# so with no input it stays put, and positive input depolarizes it until it
+# spikes and is reset -- clamping v before the instability can act. Inhibition
+# had no such clamp, so only the inhibitory half of every synapse was broken.
 LIF_MODEL = """
-dv/dt = (v - v_rest + I_syn + I_teacher + I_bg) / tau : 1
+dv/dt = (-(v - v_rest) + I_syn + I_teacher + I_bg) / tau : 1
 dI_syn/dt = -I_syn/tau_syn : 1
 I_teacher : 1
 I_bg : 1

@@ -54,12 +54,12 @@ subcircuit:
 network:
   reserve_size: 6
   reward_tau_ms: 60.0
-  background_dc_na: 0.05
+  background_dc_na: 0.0
   pair_weight_normalisation: fan_in_total
   mushroom_body_recurrent:
-    weight_ratio: 0.001
+    weight_ratio: 0.0001
   artificial_bridge:
-    weight_ratio: 0.001
+    weight_ratio: 0.002
   artificial_readout:
     weight_ratio: 0.3
   output_recurrent:

@@ -74,18 +74,53 @@ def test_positive_current_depolarizes(driven):
     ``I_syn`` carries the transmitter sign (+1 excitatory), so it must be
     added. Subtracting it made every excitatory connection hyperpolarizing and
     every inhibitory connection depolarizing, inverting the whole network.
+
+    The membrane term must also RESTORE v towards ``v_rest``. Written as
+    ``+(v - v_rest)`` the equation is anti-leak and diverges exponentially
+    (measured: v = -5e17 on lamina, -1.7e17 on mushroom_body), so the checks
+    here are on the sign of the response and on staying BOUNDED, rather than
+    on a magnitude that a diverging model trivially exceeds.
     """
     import brian2 as b2
 
     cfg, built, _ = driven
     group = built.stages["photoreceptor"].group
+    v_rest = float(cfg.get("network.lif.v_rest"))
+
     group.I_syn = 0.0
-    group.v[:] = 0.0
-    group.I_syn = 0.5
+    group.v[:] = v_rest
+    group.I_syn = 5.0
     built.brian.run(20 * b2.ms)
-    assert float(np.max(group.v[:])) > 0.1, (
-        "a positive synaptic current must depolarize the postsynaptic neuron"
+    excited = float(np.max(group.v[:]))
+    assert excited > v_rest, (
+        "a positive synaptic current must depolarize the postsynaptic neuron; "
+        f"got v={excited} at v_rest={v_rest}"
     )
+
+    group.I_syn = 0.0
+    group.v[:] = v_rest
+    group.I_syn = -5.0
+    built.brian.run(20 * b2.ms)
+    inhibited = float(np.min(group.v[:]))
+    assert inhibited < v_rest, (
+        "a negative synaptic current must hyperpolarize the postsynaptic "
+        f"neuron; got v={inhibited} at v_rest={v_rest}"
+    )
+
+    # A restoring leak settles to v_rest + I * tau. Divergence, not saturation,
+    # was the original failure, so bound the response explicitly.
+    threshold = float(cfg.get("network.lif.v_threshold"))
+    group.I_syn = 0.0
+    group.v[:] = v_rest
+    group.I_syn = 5.0
+    built.brian.run(200 * b2.ms)
+    settled = float(np.max(group.v[:]))
+    assert abs(settled) < 100 * threshold, (
+        "the membrane potential must stay bounded under constant drive; "
+        f"v={settled} indicates a diverging (anti-leak) membrane equation"
+    )
+    group.I_syn = 0.0
+    group.v[:] = v_rest
 
 
 def test_background_drive_set_when_noise_disabled(subcircuit):

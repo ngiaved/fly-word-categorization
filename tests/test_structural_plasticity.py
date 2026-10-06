@@ -145,8 +145,11 @@ def test_recruited_reserve_neurons_can_spike():
     sp.set_trial_duration(0.06)
     sp.step(trial=10)
 
-    # dv/dt = (v - v_rest - I_syn + ...)/tau, so negative I_syn is excitatory.
-    built.reserve.I_syn[:] = 5.0
+    # `I_syn` is a SIGNED current that is ADDED to the membrane equation, so a
+    # POSITIVE value is excitatory. With a restoring leak the steady state is
+    # `v_rest + I_syn * tau`, so reaching `v_threshold` (1.0) with
+    # tau=20 ms needs I_syn > 50; a small current now correctly fails to spike.
+    built.reserve.I_syn[:] = 200.0
     monitor = b2.SpikeMonitor(built.reserve, record=False)
     built.brian.add(monitor)
     built.brian.run(300 * b2.ms)
