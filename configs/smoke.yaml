@@ -61,7 +61,13 @@ network:
   artificial_bridge:
     weight_ratio: 0.002
   artificial_readout:
-    weight_ratio: 0.3
+    # Dense synthetic MB->output readout. Nested-CV accuracy of the
+    # 4-neuron output vector over all 80 words, against 0.25 chance:
+    #   0.01 -> 0.100 (silent)  0.03 -> 0.188  0.04 -> 0.200
+    #   0.10 -> 0.225           0.30 -> 0.212  1.00 -> 0.138 (saturated)
+    # 0.05 is the graded optimum: 0.338 (27/80), binomial p=0.0499, against a
+    # mushroom_body ceiling of 0.388 (31/80, p=0.0046).
+    weight_ratio: 0.05
   output_recurrent:
     weight_ratio: 0.0
   short_term_depression:
