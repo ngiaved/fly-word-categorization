@@ -271,9 +271,14 @@ rendering, dataset splits, and trial order.
    0.5–15 Hz band. The accepted scale is real (recorded in the manifest), but
    throughput is dominated by the per-trial overhead of the growth wiring, so a
    full ≥10-seed run is expensive.
-2. **Brian2 falls back to NumPy codegen** on machines without a working C++
-   compiler, which changes throughput by roughly an order of magnitude. Fix
-   the toolchain before trusting any benchmark number.
+2. **Brian2 falls back to NumPy codegen** when Cython compilation fails, which
+   changes throughput by roughly 6–10×. On a machine with a partially broken
+   Command Line Tools install the failure is a missing libc++ header
+   (`fatal error: 'ios' file not found`) even though the headers exist under the
+   SDK. Point clang at them for the run:
+   `CPLUS_INCLUDE_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1`.
+   The run manifest records the resolved `codegen_target`; verify it says
+   `cython` before trusting any benchmark number.
 3. **Unit tests exist and pass** for the scoring, split, confusion, and
    significance code (`tests/test_dopamine_learning.py`, `test_evaluation.py`,
    `test_signal_path.py`, `test_structural_plasticity.py`, plus
