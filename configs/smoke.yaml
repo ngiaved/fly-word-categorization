@@ -4,6 +4,12 @@
 # shrunk. Used by `flyread selftest` and by the fast tests. NOT a source of
 # reported numbers.
 #
+# NOTE: this file overrides the default (now odor-pathway) config and keeps
+# the original VISUAL chain, so the fast tests and selftest exercise the same
+# optic-lobe + synthetic-bridge + synthetic-readout machinery they were built
+# for. It sets `scheme_id: grid-v1` explicitly because the default config is
+# odor-v1 and Config layers defaults under this file.
+#
 #   flyread --config configs/smoke.yaml selftest
 
 simulation:
@@ -11,6 +17,15 @@ simulation:
 
 subcircuit:
   candidate: smoke
+  # Visual stages, overriding the default odor stages above. Backward seeding
+  # and the synthetic bridge/readout are re-enabled because smoke exercises
+  # the visual code path.
+  selection:
+    backward_chain: [photoreceptor, lamina, medulla, lobula]
+  bridge:
+    enabled: true
+  readout:
+    enabled: true
   stages:
     - name: photoreceptor
       rules:
@@ -79,6 +94,10 @@ calibration:
   settle_ms: 20.0
 
 encoding:
+  # Visual scheme, explicit because default.yaml is now odor-v1.
+  scheme_id: grid-v1
+  # ink_quartile explicitly, because default.yaml (odor path) uses `category`.
+  label_mode: ink_quartile
   grid_rows: 6
   grid_cols: 6
   stimulus_ms: 300.0

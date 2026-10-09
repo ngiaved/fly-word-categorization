@@ -22,7 +22,6 @@ from typing import Any, Sequence
 import numpy as np
 
 from .connectome import (
-    INPUT_STAGES,
     MUSHROOM_BODY_STAGES,
     OUTPUT_STAGES,
     TEACHER_STAGES,
@@ -232,10 +231,10 @@ def build_network(
     stages = _stage_groups(subcircuit)
     mappers = stage_index_mapper(subcircuit)
 
-    input_stages = [s for s in subcircuit.roles if s in INPUT_STAGES]
+    input_stages = [list(subcircuit.roles)[0]]
     output_stages = [s for s in subcircuit.roles if s in OUTPUT_STAGES]
     if not input_stages:
-        raise NetworkError("subcircuit has no input (photoreceptor) stage")
+        raise NetworkError("subcircuit has no input stage")
     if not output_stages:
         raise NetworkError("subcircuit has no output stage")
 
@@ -775,7 +774,7 @@ def drives_response(net, config) -> dict[str, Any]:
             np.array([float(config.get("encoding.max_hz"))]), config
         )[0]
     )
-    net.stages["photoreceptor"].group.I_syn = probe_current
+    net.stages[list(net.stages)[0]].group.I_syn = probe_current
     net.brian.run(probe_ms * b2.ms)
     output = int(np.asarray(monitors["output"].count, dtype=np.int64).sum())
     for monitor in monitors.values():
@@ -783,7 +782,7 @@ def drives_response(net, config) -> dict[str, Any]:
             net.brian.remove(monitor)
         except KeyError:
             pass
-    net.stages["photoreceptor"].group.I_syn = 0.0
+    net.stages[list(net.stages)[0]].group.I_syn = 0.0
     v_rest_value = float(config.get("network.lif.v_rest"))
     for stage in net.stages.values():
         stage.group.v = v_rest_value

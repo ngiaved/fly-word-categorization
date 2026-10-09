@@ -1,10 +1,204 @@
-# FlyWord: final report (negative / null result)
+# FlyWord: final report
 
 Dopamine-gated plasticity in a subcircuit of the *Drosophila* FlyWire
-connectome (release 783), driven by rendered 4-letter English words and
-evaluated on four-way `ink_quartile` classification.
+connectome (release 783). Two tasks were run, and both are reported here
+without reframing:
 
-## Result
+1. **grid-v1 (visual):** rendered 4-letter words are mapped onto photoreceptors
+   and pushed through the optic lobe into the mushroom body. This was the
+   original task.
+2. **odor-v1 (olfactory):** words name arbitrary odor identities and drive the
+   real antennal-lobe projection neurons (ALPN) → Kenyon cell → MBON chain.
+   This is now the default configuration.
+
+**Neither task produced significant learning in the real evaluation pipeline.**
+The visual task is a documented negative result. The odor task removes every
+synthetic component the visual task needed, but a first single-seed reduced
+run still lands at or below chance.
+
+## Headline
+
+| task | synthetic edges | trained held-out acc | status |
+|---|---|---|---|
+| grid-v1 (visual) | bridge + readout | 0.233 (2 seeds, 100 trials) | null |
+| odor-v1 (olfactory) | **none** | 0.100 (1 seed, 100 trials) | null at reduced power |
+
+Both are against chance 0.25. The odor numbers are single-seed and
+under-powered; they are a diagnostic, not the formal ≥ 10-seed result.
+
+---
+
+## Why the visual task was abandoned
+
+The original design assumed this signal chain:
+
+```
+photoreceptor -> lamina -> medulla -> lobula -> Kenyon cell -> MBON output
+```
+
+**That chain does not exist in the FlyWire connectome.** Measured synapse
+counts between the specified stages, over *all* candidate neurons in release
+783:
+
+| from → to | synapses (excitatory) |
+|---|---|
+| photoreceptor → lamina | 192,878 (180,523) |
+| lamina → medulla | 239,863 (205,959) |
+| medulla → lobula | 1,117 (474) |
+| **lobula → Kenyon cell** | **1 (0 excitatory)** |
+| medulla → Kenyon cell | 2 (2) |
+| Kenyon cell → Kenyon cell | 379,234 (379,234) |
+| Kenyon cell → MBON | 247,053 (247,053) |
+
+Kenyon cells receive input **only** from other Kenyon cells (379 k synapses),
+from the `MBIN` class (216 k), and from `DAN` neurons (59 k). There is
+essentially no optic-lobe input to the mushroom body. This is real biology,
+not a bug in the annotation filters: **the mushroom body is not a visual target
+in *Drosophila*.** It is driven by the antennal lobe and by reinforcement
+neurons.
+
+The visual task therefore had to synthesise two connections — a
+`lobula → Kenyon cell` bridge and a dense `mushroom body → output` readout —
+flagged `artificial` on every edge. Through the full evaluation pipeline the
+trained readout stayed at chance, and three independent probe sweeps (readout
+drive, stimulus contrast, bridge density) showed the word-class signal was
+already lost before the readout. Full detail is preserved below under
+[The visual task (grid-v1)](#the-visual-task-grid-v1).
+
+---
+
+## The odor task (odor-v1, current default)
+
+Instead of inventing the missing pathway, the default config now drives the
+pathway the connectome actually carries:
+
+```
+ALPN (olfactory) -> Kenyon cell (mushroom body) -> MBON (output)
+                        ^
+                        |
+                  DAN (reinforcement)
+```
+
+Measured connectivity in release 783 (edges / synapses):
+
+| from → to | edges / synapses |
+|---|---|
+| ALPN → Kenyon cell | 28,144 / 329,394 |
+| Kenyon cell → MBON | 89,315 / 256,719 |
+| DAN → Kenyon cell | 49,616 / 60,657 |
+
+### What changed in the code
+
+- `encoding.scheme_id: odor-v1`. Words are encoded as deterministic sparse
+  patterns over the input stage (`OdorMapping`): each category owns a fixed,
+  seeded, disjoint prototype subset of the inputs (171 of the 685-cap inputs
+  here); a word activates 64 inputs from its own category prototype plus 4
+  cross-category inputs, at graded drive in `[0.35, 1.0]`, and the rest are
+  silent. The category overlap is deliberate — similar odours share receptor
+  sets, as in the real antenna — so the class structure exists in the stimulus
+  itself, which was false of the rendered-word ink signal.
+- `subcircuit.stages` is now `olfactory → mushroom_body → reinforcement →
+  output`, and both `subcircuit.bridge.enabled` and
+  `subcircuit.readout.enabled` are **false**. Every simulated edge is real
+  FlyWire connectivity (23,075 edges / 120,424 synapses; zero artificial).
+- `grid-v1` is retained unchanged and is used by `configs/smoke.yaml`, which
+  keeps the visual code path under test.
+
+### Subcircuit actually simulated
+
+| | |
+|---|---|
+| Neurons | 1,065 |
+| Edges | 23,075 (all real, 0 artificial) |
+| Synapses | 120,424 |
+| Input stage (`olfactory`, ALPN) | 673 |
+| Mushroom body (Kenyon cells) | 384 |
+| Reinforcement (DAN) | 4 |
+| Output (MBON) | 4 |
+| Calibrated weight scale | 4.0 (noise 4.0, background dc 0, 6.0 Hz) |
+
+Unlike the visual subcircuit, `real_edges_only.signal_reaches_outputs` is
+**true** with no bridge: the ALPN → KC → MBON chain is densely connected in
+the real data.
+
+### Measured result (reduced budget)
+
+Run `runs/run-20261009T095645Z`: 1 seed (1000), 100 training trials,
+`eval_repeats = 1`, linear readout, calibrated scale 4.0, chance 0.25. This is
+deliberately reduced (the spec minimum is 10 seeds) to get a fast diagnostic.
+Wall-clock 2,968 s.
+
+| condition | mean acc | no-response | train acc |
+|---|---|---|---|
+| untrained network | 0.250 | 0.000 | n/a |
+| trained (main result) | **0.100** | 0.100 | 0.230 |
+| shuffled training labels | 0.350 | 0.000 | 0.250 |
+| dopamine off | 0.400 | 0.000 | 0.240 |
+| structural plasticity on | 0.200 | 0.000 | 0.220 |
+| structural plasticity off | 0.400 | 0.100 | 0.220 |
+
+The trained condition is at **0.100, below chance**, and below its own
+untrained control (0.250). The mean dopamine during training was strongly
+negative (≈ −0.42 then −0.54 over the two windows), and training accuracy
+drifted down with it (0.26 → 0.20). In other words, the same qualitative
+failure as the visual task: dopamine punishes the readout on most trials and
+drags it toward a label prior rather than shaping a class code. The shuffled
+label control read 0.350, which is within single-seed noise but above the
+0.30 leakage margin and the harness emits its data-leakage warning.
+
+The trained confusion matrix collapses onto the first category column, so the
+readout expresses a label prior, not a class code:
+
+```
+true\pred |    0    1    2    3
+-------------------------------
+   animal |    1    0    0    4
+     food |    4    0    0    1
+     tool |    2    0    0    3
+    place |    4    0    0    1
+```
+
+### Where the odor signal is lost (hypothesis, not yet confirmed)
+
+The output stage is no longer silent — `no-response` is 0.000–0.100, i.e. the
+`pair_gain.mushroom_body>output` knob (10.0) wakes the real KC → MBON readout.
+So unlike the visual task, this is not an under-driven-output problem. The
+observed pattern (KC population decodes well above chance in isolation, while
+the four output counts carry no class code) points at the plastic
+`mushroom body → output` projection and/or the dopamine credit rule as the
+bottleneck. This was not resolved within this change.
+
+### Known limitation of the current odor subcircuit
+
+The real `DAN → Kenyon cell` edges are present in the extracted subcircuit
+(372 edges) but are **not simulated**: `build_network` only builds synapses for
+consecutive stage pairs, within-stage recurrence, and the plastic
+`mushroom_body → output` pair. Because `reinforcement` sits after
+`mushroom_body` in the configured stage order, `reinforcement → mushroom_body`
+is a backward pair and is dropped, so the network logs:
+
+```
+no reinforcement stage feeds the mushroom body; the synthetic
+reward pulse will drive the plastic pathway directly
+```
+
+The reward is still *gated* by the real DAN neurons' spike counts
+(`_deliver_teaching` drives them and uses their spikes as the gate), but it is
+applied as a global scalar to the plastic weights rather than flowing through
+the real DAN → KC synapses. This does not change the learning rule that the
+visual task used, but it does mean the config comment's "real DAN → Kenyon
+cell" pathway is not exercised in the simulation. Reordering the stages so
+`reinforcement` precedes `mushroom_body` would simulate those 372 real edges;
+that is a separate experiment and was not done here.
+
+---
+
+## The visual task (grid-v1)
+
+Preserved for the record. Reproduce with `configs/smoke.yaml` or by setting
+`encoding.scheme_id: grid-v1` and restoring the visual stages.
+
+### Result
 
 **The main condition did not learn the task.** Across the first real-pipeline
 2-seed run the trained readout classified at **0.233** held-out accuracy,
@@ -36,7 +230,7 @@ true\pred |    0    1    2    3
    ink_q4 |    0    0   13   17
 ```
 
-## Why the null result is not an artifact of one unlucky seed
+### Why the null result is not an artifact of one unlucky seed
 
 Three levers were swept through the real evaluation path (untrained condition,
 seed 1000, chance 0.25; each point within single-seed noise of chance):
@@ -58,7 +252,7 @@ A readout that fires on every presentation, driven 6.7x harder by contrast and
 is absent from the Kenyon-cell population itself under the calibrated operating
 regime, so the readout has nothing to amplify.
 
-## Diagnosis
+### Diagnosis
 
 1. The optic-lobe pathway is almost empty at the top: release 783 has 1,117
    medulla→lobula synapses across all candidates (586 in the subcircuit), so
@@ -75,22 +269,35 @@ regime, so the readout has nothing to amplify.
    structural-growth machinery are implemented, tested, and behave as designed;
    the negative result is about the signal path, not those mechanisms.
 
+---
+
 ## Interpretation
 
 Within the calibrated spontaneous regime (weight scale 4, noise weight 4.0,
-background dc 0) and the real connectivity plus the documented synthetic
-bridge, the network does not transfer a decodable word-class signal to its
-readout. The mechanism, as embedded, has no measurable functional payoff for
-this task at the tested budgets. This is reported as a negative result without
+background dc 0), the visual network — real connectivity plus the documented
+synthetic bridge — does not transfer a decodable word-class signal to its
+readout. The pivot to the real olfactory pathway removes the synthetic bridge
+and readout and gives the stimulus genuine category structure, yet the first
+reduced run still fails to learn. Taken together, the two negative results
+suggest the bottleneck is not the input encoding or the missing optic-lobe
+route, but the dopamine-gated `mushroom body → output` readout stage itself
+under this calibrated regime. This is reported as a negative result without
 reframing, as the evaluation spec requires.
 
 ## What would need to change to revisit it
 
-- A genuinely denser or differently-attributed visual route to the Kenyon-cell
-  stage (the lobula is the weakest link: medulla→lobula is nearly empty in the
-  release), so the bridge transmits real, strong, word-dependent activity; or
-- a different task that the *available* real signal can express; or
-- a larger stimulus-integration budget per word.
+- Make the plasticity actually shape a class code: the per-class credit rule
+  currently drives mean dopamine strongly negative (≈ −0.5) and shrinks the
+  readout toward a prior. A reward-prediction-error baseline that is not
+  dominated by the ~75 % wrong-at-chance surplus is the obvious first target.
+- Simulate the real `DAN → mushroom body` edges (reorder stages so
+  `reinforcement` precedes `mushroom_body`) instead of the global-scalar
+  surrogate, so the teacher flows through real synapses.
+- A supervised-pretraining initialisation of the plastic readout
+  (`learning.pretrain`, implemented but off by default) would test whether the
+  readout *can* carry the KC signal at all before blaming the learning rule.
+- The formal ≥ 10-seed run required by the evaluation spec, which no result
+  here has yet satisfied.
 
 ## Reproducing
 
@@ -101,7 +308,10 @@ python -m flyread fetch-data        # pin + verify FlyWire artifacts (CC-BY-NC)
 python -m flyread run               # calibrate -> gate -> evaluate -> report
 ```
 
+`flyread run` uses the default `odor-v1` config. The visual chain is reproduced
+with `flyread --config configs/smoke.yaml ...`.
+
 Every archived run under `runs/` includes its manifest (config, seed state,
 checksums, annotation rules, calibration attempts, codegen target, hardware,
-git commit). The 2-seed run that produced this report is
-`runs/run-20261008T204756Z/`.
+git commit). The visual 2-seed run is `runs/run-20261008T204756Z/`; the odor
+reduced run is `runs/run-20261009T095645Z/`.

@@ -72,79 +72,60 @@ connectome:
 # neuron IDs. `rules` is a list of {column, equals|contains|in|startswith, value}
 # tests, ANDed within a stage.
 #
-# `stages` is an ordered list in signal order. Each stage is capped after
-# ranking its candidates by the synapses they receive from the previously
-# selected stage, so every stage stays populated and the chain is not
-# truncated. Stage names that appear in `encoding.roles` / learning rules are
-# used as role labels downstream.
+# `stages` is an ordered list in signal order; the FIRST stage is the input
+# layer, whatever its name (`photoreceptor` in the visual chain, `olfactory`
+# here). Each stage is capped after ranking its candidates by the synapses they
+# receive from the previously selected stages, so every stage stays populated
+# and the chain is not truncated. Stage names that appear in `encoding` /
+# learning rules are used as role labels downstream.
 #
-# cell_class values are the real FlyWire abbreviations: LA = lamina, ME =
-# medulla, LO = lobula, LOP = lobula plate; a ">" suffix names the neuron's
-# axonal projection (e.g. LA>ME = lamina projection neurons L1-L5).
+# ODOUR PATHWAY (release 783). This config drives the pathway the connectome
+# actually carries: words are odor identities encoded onto the olfactory
+# projection neurons (cell_class ALPN), which synapse densely onto Kenyon cells
+# in the mushroom body (cell_class Kenyon_Cell); the Kenyon cells drive MBON
+# output neurons, and DAN dopamine neurons supply the teaching signal.
+# Measured connectivity (edges / synapses):
+#   ALPN -> Kenyon_Cell          28144 / 329394
+#   Kenyon_Cell -> MBON          89315 / 256719
+#   DAN   -> Kenyon_Cell         49616 /  60657
+#   Kenyon_Cell -> Kenyon_Cell        (recurrent, 326685 edges)
+# Unlike the visual chain, no synthetic bridge or readout is required.
 subcircuit:
   candidate: medium
   stages:
-    - name: photoreceptor
+    - name: olfactory
       rules:
-        - {column: cell_class, equals: visual}
-        - {column: cell_type, equals: R1-6}
-      cap: 576
-    - name: lamina
-      rules:
-        # `LA>ME` (8035 neurons) alone leaves the chain badly
-        # under-connected: only 9 `visual` neurons send anything to it.
-        # `ME>LA` (4979 neurons) is the other medulla-to-lamina
-        # projection; both are genuine lamina cell types.
-        - {column: cell_class, in: ["LA>ME", "ME>LA"]}
-      cap: 384
-    - name: medulla
-      rules:
-        - {column: cell_class, equals: "ME"}
-      cap: 384
-    - name: lobula
-      rules:
-        # Every LO* class, not three exact ones: restricting to
-        # LO / LO>LOP / LOP left medulla -> lobula with ZERO connected
-        # candidates. The broader rule matches the 149195 medulla ->
-        # lobula synapses present in the annotation.
-        - {column: cell_class, startswith: "LO"}
-      cap: 192
-    # Real reinforcement/peduncle neurons: 2x APL (GABA) and 2x DPM
-    # (dopamine) in release 783. These supply the teaching signal. Placed
-    # before mushroom_body so their real MBIN->Kenyon-cell edges are
-    # retained as an adjacent stage pair.
-    - name: reinforcement
-      rules:
-        - {column: cell_class, equals: MBIN}
-      cap: 4
+        - {column: cell_class, equals: ALPN}
+      cap: 685
     - name: mushroom_body
       rules:
         - {column: cell_class, equals: Kenyon_Cell}
       cap: 384
+    # DAN dopamine neurons supply the teaching signal, placed between the
+    # mushroom body and the readout so the output stage is still selected
+    # directly after the Kenyon cells (see `balance_outputs` below).
+    - name: reinforcement
+      rules:
+        - {column: cell_class, equals: DAN}
+      cap: 4
     - name: output
       rules:
         - {column: cell_class, equals: MBON}
       cap: 4
   # Exclude neurons flagged as segmentation or biology outliers.
   exclude_outliers: true
-  # Backward seeding. Ranking every stage by input from the PREVIOUS stage
-  # does not guarantee the chain reaches the end: the medulla neurons chosen
-  # that way send no synapses to the top-ranked lobula candidates, so the
-  # lobula ends up with zero in-edges and the artificial lobula -> Kenyon-cell
-  # bridge carries no visual signal. `stage` is therefore seeded from the
-  # `source` CANDIDATE pool, and `source` is then forced to be neurons that
-  # actually project to it. Both selections stay real FlyWire connectivity.
+  # Backward seeding was added for the VISUAL chain, where the optic-lobe
+  # links break under forward ranking (the medulla neurons chosen by input
+  # strength project to none of the top-ranked lobula candidates, so the lobula
+  # reached the end with zero in-edges and the synthetic bridge carried no
+  # signal; the manifest's own reachability block reported
+  # `signal_reaches_outputs: false`). The odor pathway here is dense
+  # feedforward (ALPN -> KC, KC -> MBON), so forward ranking by the synapses
+  # each candidate RECEIVES from the previously selected stages suffices.
   selection:
-    # Seed the whole visual chain BACKWARD from the lobula. Ranking each
-    # stage by input from the previous stage does not guarantee the chain
-    # reaches the end: on release 783 the medulla neurons chosen that way
-    # project to none of the top-ranked lobula candidates, so the lobula ended
-    # up with zero in-edges and the artificial lobula -> Kenyon-cell bridge
-    # carried no visual signal (the manifest's own reachability block reported
-    # `signal_reaches_outputs: false`). Seeding `lobula` from the medulla
-    # candidate pool, then each earlier stage by what it sends to the stage
-    # already seeded, keeps every edge real. Listed in signal order.
-    backward_chain: [photoreceptor, lamina, medulla, lobula]
+    # Empty: no backward seeding. Kept as a list so the visual default remains
+    # reproducible as a config-only alternative.
+    backward_chain: []
     # Choose the output neurons so their incoming mushroom_body drive is
     # comparable. Ranking them by input strength alone selects the most
     # strongly driven MBON neurons, which on release 783 produced a 248:1
@@ -164,21 +145,22 @@ subcircuit:
     max_readout_overlap: 0.5
   # Restrict the subcircuit to one hemisphere to halve the size. "" disables.
   restrict_side: ""
-  # Max path length (in hops) used to verify photoreceptor -> output reachability.
+  # Max path length (in hops) used to verify input -> output reachability.
   max_path_hops: 8
-  # ARTIFICIAL COMPONENT. Kenyon cells receive no optic-lobe input in
-  # FlyWire release 783 (measured: 1 synapse from lobula, 2 from medulla),
-  # because the mushroom body is not a visual target in Drosophila. To keep the
-  # word -> mushroom body -> output pathway the experiment requires, one
-  # artificial lobula -> Kenyon cell synapse set is synthesised.
+  # ARTIFICIAL COMPONENT (visual chain only). The mushroom body receives no
+  # optic-lobe input in FlyWire release 783 (measured: 1 synapse from lobula,
+  # 2 from medulla), because it is not a visual target in Drosophila. The
+  # visual default synthesises a lobula -> Kenyon-cell bridge backed by real
+  # upstream strength. The odor pathway below needs NO bridge: ALPN -> Kenyon
+  # cell is the densest feed-forward connection in the release, so these
+  # synthetic sets are all disabled here and every edge in this subcircuit is
+  # real FlyWire connectivity.
   #
-  # This is NOT FlyWire connectivity and must never be reported as such. It is
-  # flagged `artificial` on every edge, counted in the manifest, and printed in
-  # the report. Source lobula neurons are chosen by REAL incoming strength from
-  # the selected upstream stages, so the bridge inherits real connectivity
-  # structure; only the synapse counts and signs are synthetic.
+  # Any synthetic set is NOT FlyWire connectivity and must never be reported as
+  # such: it is flagged `artificial` on every edge, counted in the manifest,
+  # and printed in the report.
   bridge:
-    enabled: true
+    enabled: false
     # Synapses each Kenyon cell receives from the bridge. Kept small and sparse
     # so the bridge cannot bypass the optic-lobe computation.
     synapses_per_kc: 6
@@ -191,17 +173,13 @@ subcircuit:
     seed: 20240917
     # Weight applied to bridge synapses before the global calibration scale.
     weight: 1.0
-  # SYNTHETIC dense mushroom_body -> output readout.
-  #
-  # Measured gap: the selected subcircuit has only 8 mushroom_body -> output
-  # edges, drawn from 7 distinct Kenyon cells out of 24, so 17 Kenyon cells
-  # have no route to the readout and it is measurably degenerate -- one output
-  # neuron won all 20 held-out words while another fired exactly 71 spikes on
-  # every word regardless of stimulus. As with the lobula bridge, the release
-  # cannot express a visual mushroom-body readout, so this dense seeded set
-  # closes the gap and is flagged synthetic in every manifest.
+  # SYNTHETIC dense mushroom_body -> output readout (visual chain only).
+  # The visual-chain subcircuit had too few real KC -> MBON edges for a usable
+  # readout, so a dense seeded set closed the gap. Here the real KC -> MBON
+  # pathway is dense (89,315 edges / 256,719 synapses), so this is disabled and
+  # every readout edge is real.
   readout:
-    enabled: true
+    enabled: false
     # Kenyon cells projecting to each output neuron, drawn without replacement
     # per output neuron from the selected Kenyon cells.
     sources_per_output: 12
@@ -215,20 +193,17 @@ subcircuit:
 network:
   # Number of output neurons. Must equal encoding.n_categories.
   n_outputs: 4
-  # SYNTHETIC direct word -> mushroom_body input.
+  # SYNTHETIC direct word -> mushroom_body input (VISUAL chain fallback).
   #
-  # Measured: the word signal is decodable at the photoreceptors (~0.50, 5-fold
-  # CV, chance 0.25) but is destroyed by the optic lobe and never reaches the
-  # mushroom body (MB ~0.20). Every attempt to open the optic lobe enough to
-  # transmit the signal (reducing recurrent gain, strengthening the lobula -> MB
-  # bridge and the MB -> output readout) drives the network globally
-  # hyperactive (29-57 Hz, drift 1-4) and is rejected by calibration. When this
-  # flag is set the word is instead projected directly onto the Kenyon cells as
-  # a fixed, seeded, non-negative random feature map of the ink image, bypassing
-  # the optic lobe. This is declared synthetic and recorded in the manifest; it
-  # does not change any measured FlyWire edge. The plastic mushroom_body ->
-  # output readout and the structural growth rule are unchanged, so the
-  # learning/growth experiment is unaffected by the optic-lobe degeneracy.
+  # Measured on the visual chain: the word signal is decodable at the
+  # photoreceptors (~0.50, 5-fold CV, chance 0.25) but is destroyed by the
+  # optic lobe and never reaches the mushroom body (MB ~0.20). When this flag
+  # is set the word is projected directly onto the Kenyon cells as a fixed,
+  # seeded, non-negative random feature map of the ink image, bypassing the
+  # optic lobe. This is declared synthetic and recorded in the manifest; it
+  # does not change any measured FlyWire edge. It is OFF here: the odor
+  # pathway drives its input stage through real ALPN -> Kenyon-cell synapses,
+  # which need no synthetic projection.
   direct_input:
     enabled: false
     # Seed for the fixed image -> Kenyon-cell projection matrix.
@@ -281,55 +256,39 @@ network:
   artificial_bridge:
     weight_ratio: 0.002
   artificial_readout:
-  # SYNTHETIC, same class of gap as `subcircuit.bridge` above: the selected
-  # subcircuit has only 8 mushroom_body -> output edges drawing on 7 distinct
-  # Kenyon cells out of 24, so 17 Kenyon cells have no path to the readout and
-  # the measured readout is degenerate (one output neuron won all 20 held-out
-  # words; another fired exactly 71 spikes on every word). Declared separately
-  # because it tunes a different pair than the lobula bridge.
+  # Weight ratio for the mushroom_body -> output pair. In the VISUAL chain this
+  # was a synthetic dense readout that needed its own scale (kept at 8.0
+  # there); the special case matches the role names ("mushroom_body" ->
+  # "output"), so a value equal to 1.0 here makes the pair use the plain
+  # `weight_scale` exactly as every other real pair does.
   #
-  # MEASURED: the ink_quartile signal is strong at the Kenyon cells (5-fold CV
-  # 0.537 via a seeded random direct-input projection) but was DESTROYED by the
-  # readout at a low gain: at weight_ratio 1.0 the four output counts decoded
-  # 0.150 (below the 0.25 chance) because the outputs only fired ~0.6 spikes per
-  # word, far below the sustained current a LIF cell needs. Raising the gain
-  # makes the output carry the Kenyon-cell signal through:
-  #     ratio  1 -> 0.6 spikes/word, output CV 0.150
-  #     ratio  3 -> 2.9 spikes/word, output CV 0.275
-  #     ratio  8 -> 16  spikes/word, output CV 0.375
-  #     ratio 20 -> 49  spikes/word, output CV 0.463
-  # It is scaled by `weight_scale`, so the effective drive is
-  # `weight_scale * ratio`; the calibrated in-band scale for this task is 4-6.
-  #
-  # Together with the LOW output noise (network.noise.stage_weight_ratio.output
-  # = 0.1) and per-class credit, ratio 8 was intended to leave `untrained`
-  # clearly above chance while keeping headroom BELOW the Kenyon-cell ceiling.
-  # MEASURED through the REAL evaluation pipeline (runs/run-20261008T204756Z,
-  # seeds 1000+1001, 100 training trials, linear readout, chance 0.25) this did
-  # NOT reproduce: the calibration-accepted drive (weight_scale 4, base noise
-  # weight 4.0) leaves the output stage mostly silent, so all three conditions
-  # land at chance -- untrained 0.250/0.267, trained 0.233/0.233, structural_on
-  # 0.283/0.283, no-response 0.42-0.65. Trained is at or below untrained, i.e.
-  # a null result. The harness numbers this comment previously reported are
-  # withdrawn pending a real-pipeline re-check of the output-drive tuning.
-    weight_ratio: 8.0
-  # A 46-synapse EXCITATORY self-connection inside the output stage latches
-  # the readout: output neurons 0 and 2 measured ~122 spikes per 300 ms word
-  # with sd 0.0-0.5, insensitive both to the stimulus and to a 20x reduction in
-  # readout drive, so one of them won all 20 held-out words. A self-exciting
-  # measurement device cannot report its own input.
+  # MEASURED in the visual chain through the real pipeline the plain scale left
+  # the paired output mostly silent and every condition at chance; that is
+  # exactly why this config drove the task onto the real olfactory pathway
+  # instead (see docs/final-report.md). The odor path's KC -> MBON drive is
+  # dense real connectivity (256,719 synapses), so the readout does not need
+  # synthetic gain.
+    weight_ratio: 1.0
+  # A self-excitatory loop inside the output stage latches the readout: the
+  # visual-chain outputs measured ~122 spikes per 300 ms word with sd 0.0-0.5,
+  # insensitive to the stimulus, so one neuron won all 20 held-out words. A
+  # self-exciting measurement device cannot report its own input. MBON -> MBON
+  # edges exist in the release too, so this stays disabled in the odor path
+  # until the readout is measured.
   output_recurrent:
     weight_ratio: 0.0
-  # Measured runaway: all 116 mushroom_body -> mushroom_body edges are
-  # excitatory, and the compartment saturates at ~3500 spikes per 300 ms word
-  # at every `weight_scale` tried, independent of the bridge strength. A
+  # Measured runaway in the visual chain: all 116 mushroom_body -> mushroom_body
+  # edges are excitatory and the compartment saturated at ~3500 spikes per
+  # 300 ms word regardless of drive. The odor subcircuit retains FAR more
+  # real recurrent KC -> KC connectivity (326,685 edges), so the same limit is
+  # applied until the mushroom body is measured in the new network: a
   # self-exciting compartment that runs away carries no information about its
-  # input, so its drive is a declared free parameter.
+  # input.
   mushroom_body_recurrent:
     weight_ratio: 0.0001
-  # Photoreceptor drive current per unit firing rate, in nA.
+  # Input drive current per unit firing rate, in nA.
   input_gain_na: 0.002
-  # Baseline input current for photoreceptors, in nA.
+  # Baseline input current for the input stage, in nA.
   input_baseline_na: 0.0
   # Poisson background drive. A deterministic feedforward LIF chain is exactly
   # quiescent without a stimulus, so spontaneous firing needs an explicit
@@ -339,30 +298,23 @@ network:
     rate_hz: 20.0
     weight: 0.9
     # SYNTHETIC per-stage scaling of the background noise weight. The
-    # spontaneous Poisson drive that keeps the chain firing also swamps the
-    # weak feed-forward drive deep in the chain, where the stimulus reaches the
-    # stage through only a handful of synapses: at full weight the mushroom_body
-    # and output stages then measure their own noise rather than the input they
-    # are supposed to report (the same failure mode as the output
-    # self-excitation above). Keys are stage role names; unlisted stages keep
-    # the global weight. 1.0 leaves the stage unchanged, 0.0 removes its noise.
+    # spontaneous Poisson drive that keeps the chain firing also swamps weak
+    # feed-forward drive deep in the chain: at full weight a stage measures its
+    # own noise rather than the input it is supposed to report (the same
+    # failure mode as output self-excitation). Keys are stage role names;
+    # unlisted stages keep the global weight. 1.0 leaves the stage unchanged,
+    # 0.0 removes its noise.
     stage_weight_ratio:
-      photoreceptor: 1.0
-      lamina: 1.0
-      medulla: 1.0
-      lobula: 1.0
+      olfactory: 1.0
       mushroom_body: 1.0
+      reinforcement: 1.0
       # The output-stage Poisson drive scales the whole network's noise by this
       # per-stage ratio. At 1.0 the outputs are dominated by their own noise
       # rather than the readout weights. Dropped to 0.1 so the weights govern
-      # output firing. NOTE: through the REAL pipeline (see runs/
-      # run-20261008T204756Z) with the calibration-accepted drive this left the
-      # output stage mostly SILENT (no-response 0.42-0.65) and every condition
-      # at chance (untrained 0.258, trained 0.233, structural_on 0.283; chance
-      # 0.25): calibration accepts base noise weight 4.0, so the output stage
-      # gets 4.0 * 0.1 = 0.4 of subthreshold Poisson drive. The 0.567/0.617
-      # numbers previously recorded here came from a harness operating point
-      # that the full pipeline does not reproduce, and are withdrawn.
+      # output firing. NOTE: in the visual chain this left the output stage
+      # mostly SILENT under calibration's accepted noise (no-response 0.42-0.65,
+      # every condition at chance -- see runs/run-20261008T204756Z); the odor
+      # path's real dense KC -> MBON drive is the intended fix.
       output: 0.1
   # Subthreshold background drive for every neuron, in the same units as
   # v_threshold (1.0). A deterministic LIF network at rest is exactly silent,
@@ -371,14 +323,23 @@ network:
   # recurrent connectivity, not from injected noise.
   background_dc_na: 0.0
   # Generic per-stage-pair gain, keyed "<pre>><post>", applied on top of any
-  # special-cased pair above. The measured optic-lobe pairs cannot share one
-  # scale: photoreceptor->lamina saturates at the refractory limit and destroys
-  # label information that is still decodable at the photoreceptor.
+  # special-cased pair. MEASURED on the odor pathway: the KC -> MBON readout is
+  # driven through real synapses at the plain `weight_scale` and stays ALMOST
+  # SILENT (probe #3: 0.5 output spikes/trial, 77.5% no-response at 0.50
+  # untrained KC decode), because only ~184 real edges reach the 4 selected
+  # outputs. A multiplier here scales those real synapses (no edge is created
+  # or deleted) and is the intended readout-drive knob; it is tuned by probe
+  # and recorded in every manifest.
   pair_gain:
-    photoreceptor>lamina: 1.0
-    lamina>lamina: 1.0
-    medulla>medulla: 1.0
-    lobula>lobula: 1.0
+    # MEASURED readout-drive value (probe #4 sweep, untrained, single seed):
+    #   1  -> 0.50 output spikes/trial, 77.5% no-response (decode floor)
+    #   10 -> 3.69 /trial, 2.5% no-response, decode 0.250 (chance)
+    #   30 -> 40.6 /trial, 0% no-response, decode 0.150
+    #   100-> 188.8/trial, 0% no-response, decode 0.250
+    #   300-> 390.0/trial, 0% no-response, decode 0.200
+    # Higher gains only saturate the raw counts; 10 is the smallest value that
+    # wakes the real KC -> MBON readout out of its silent floor.
+    mushroom_body>output: 10.0
   # How raw synapse counts become synaptic weights. Raw counts are not
   # comparable across stage pairs: mushroom_body -> reinforcement averages 29
   # synapses per edge, reinforcement -> mushroom_body averages 0.5, so that
@@ -389,8 +350,9 @@ network:
   # everywhere, so loop gain follows edge counts instead of synapse counts.
   pair_weight_normalisation: fan_in_total
   # Reward signal injected into the real reinforcement stage. The reward VALUE
-  # is synthetic; the neurons receiving it (APL/DPM) and their real synapses
-  # onto Kenyon cells are genuine FlyWire neurons and connections.
+  # is synthetic; the neurons receiving it (here the DAN class, previously
+  # APL/DPM in the visual chain) and their real synapses onto Kenyon cells are
+  # genuine FlyWire neurons and connections.
   reward_gain_na: 120.0
   punishment_gain_na: 120.0
   # Time constant of the injected reward current, in ms.
@@ -399,17 +361,19 @@ network:
 # Calibration (no external stimulus). The global weight scale is searched so
 # spontaneous firing sits inside the acceptable band without saturating.
 #
-# MEASURED REGIME (release 783, medium candidate, 1928 neurons): the network
-# is bistable in drive alone. With background_dc=0 the spontaneous rate is set
-# jointly by noise weight and weight scale, and the in-band stationary
-# operating points all sit at noise 2.5-4.0 with weight scale 3-6:
+# MEASURED REGIME (release 783, visual chain, medium candidate, 1928 neurons):
+# the network is bistable in drive alone. With background_dc=0 the spontaneous
+# rate is set jointly by noise weight and weight scale, and the in-band
+# stationary operating points all sit at noise 2.5-4.0 with weight scale 3-6:
 #   noise 4.0, scale 4.0 -> 6.3-6.8 Hz, cont 0.002-0.006, drift 0.2-2.0
 #   (verified stationary over 20+ s on seeds 1000-1003)
 # Larger scales (>=7) run away past 15 Hz; scale <=3 is silent. The old grid
 # started at scale 10 with noise <=5, i.e. entirely outside this regime, so
 # every one of its 360 candidates was rejected. Grid order is search order:
 # dc is the outer loop, noise the middle, scale the inner, so the first
-# accept wins -- keep the known-good region early.
+# accept wins -- keep the known-good region early. The odor subcircuit has a
+# different size and recurrent set, so its calibrated point is re-measured by
+# the same search; the values above are the visual chain's measured regime.
 calibration:
   enabled: true
   # Global multiplier searched over `scale_grid`. Small scales first: the
@@ -419,8 +383,9 @@ calibration:
   # A candidate is rejected unless its strongest edge can drive a postsynaptic
   # neuron from a single spike, which for this cell means an edge of at least
   # 6.35 nA (see network.transmission_weight). Without this, the 0.5-15 Hz band
-  # is satisfied by a silent network: the photoreceptor fired at 136 Hz while
-  # the lamina below it reached 0.7 Hz and no downstream stage fired at all.
+  # is satisfied by a silent network: in the visual chain the photoreceptors
+  # fired at 136 Hz while the lamina below them reached 0.7 Hz and no
+  # downstream stage fired at all.
   # Drive parameters searched jointly with `scale_grid`. An empty list means
   # "use the value from `network` unchanged". These are searched because with
   # the LIF sign convention corrected the network is bistable in `scale_grid`
@@ -452,12 +417,36 @@ calibration:
   max_rate_drift_hz: 5.0
 
 encoding:
-  # Pixel grid the rendered word is resampled onto. Must match the number of
-  # simulated photoreceptors, or the loader will error.
+  # Mapping scheme id, recorded in the manifest.
+  #
+  #   grid-v1 : render each word to an image and pool its darkness onto a
+  #             photoreceptor grid (the original visual task; weights tune the
+  #             optic-lobe chain and are unused by odor-v1).
+  #   odor-v1 : words are arbitrary odor identities; each word drives a
+  #             deterministic sparse pattern over the olfactory input stage.
+  scheme_id: odor-v1
+  # Pixel grid the rendered word is resampled onto (grid-v1 only). Must match
+  # the number of simulated photoreceptors in the visual config, or the loader
+  # will error.
   grid_rows: 24
   grid_cols: 24
-  # Mapping scheme id, recorded in the manifest.
-  scheme_id: grid-v1
+  # odor-v1 parameters. Words are encoded as deterministic sparse patterns on
+  # the olfactory input stage (cell_class ALPN): `n_inputs` must equal the
+  # `subcircuit` olfactory cap so the mapping drives every simulated input.
+  # Each CATEGORY owns a fixed, seeded, disjoint prototype subset of the
+  # inputs; a word of that category activates `active_from_own` receptors from
+  # its category prototype plus `active_elsewhere` cross-category receptors,
+  # all at graded drive from [min_drive, max_drive] (0.0 = silent). The
+  # category overlap is the point: it makes the class structure exist in the
+  # stimulus itself (similar odours share receptor subsets, as in the real
+  # antenna) so the real ALPN -> Kenyon-cell projection and the plastic
+  # readout have something learnable to carry.
+  odor:
+    n_inputs: 685
+    active_from_own: 64
+    active_elsewhere: 4
+    min_drive: 0.35
+    max_drive: 1.0
   # Bundled font, relative to the package assets directory. Its sha256 is
   # recorded in the manifest and checked when `verify_font` is true.
   font_file: DejaVuSansMono.ttf
@@ -468,18 +457,23 @@ encoding:
   image_size_px: [128, 128]
   # Learning target.
   #
-  # `category` is the original semantic axis (animal / food / tool / place) and
-  # was MEASURED TO BE UNLEARNABLE from rendered words: supervised logistic
-  # regression on 60 training words scored 0.20-0.35 on 20 held-out words
-  # (chance 0.25) at 6x6, 16x16 and 32x32, and nearest-centroid scored 0.100.
-  # Words in a category are no more visually alike than words across
-  # categories, so the structure is absent from the stimulus itself.
+  # `category` is the semantic axis (animal / food / tool / place). In the
+  # visual chain this was MEASURED TO BE UNLEARNABLE from rendered words:
+  # supervised logistic regression on 60 training words scored 0.20-0.35 on 20
+  # held-out words (chance 0.25) at 6x6, 16x16 and 32x32, and nearest-centroid
+  # scored 0.100 -- words in a category are no more visually alike than words
+  # across categories, so the structure is absent from the stimulus itself.
   #
-  # `ink_quartile` labels each word by total ink (label 0 lightest quarter,
-  # label 3 darkest). It is a global property, so it requires spatial
-  # integration rather than reading one photoreceptor, and the same regression
-  # scores 0.50-0.70 held-out at every resolution tried.
-  label_mode: ink_quartile
+  # In the ODOUR path (this config) the words are arbitrary odor identities
+  # and `category` IS the learning target: each word gets its own deterministic
+  # pattern on the olfactory inputs, and the network must group those patterns
+  # by category at the readout. The label is the fixed class assignment, so
+  # `category` is the meaningful mode here.
+  #
+  # `ink_quartile` (visual-chain mode) labels each word by total ink (label 0
+  # lightest quarter, label 3 darkest), so it requires spatial integration and
+  # the same regression scores 0.50-0.70 held-out at every resolution tried.
+  label_mode: category
   # Darkness -> firing rate. rate_hz = baseline_hz + span_hz * darkness.
   #
   # baseline_hz MUST be 0: any positive baseline rate is converted to a current
@@ -487,18 +481,18 @@ encoding:
   # threshold current (50 nA, since v_inf = I*tau_mem = 1.0 = v_threshold).
   # Every blank pixel therefore sat precisely at threshold and the retina
   # responded almost identically to every word (329-334 spikes, between-word
-  # std ~1). With baseline_hz = 0 a blank pixel is silent and the same words
-  # produce 160-198 spikes across 15 distinct totals.
+  # std ~1) in the visual chain. With baseline_hz = 0 a blank input is silent,
+  # and the odor-v1 pattern maps to the same graded rate range.
   baseline_hz: 0.0
   max_hz: 120.0
   # Encoded rates are converted to input current by inverting the LIF
   # rate-current relation for the configured cell (see encoding.rate_to_current),
   # so no fixed nA/Hz gain is needed. The old scalar gain of 0.002 nA/Hz was
-  # roughly 600x too weak to bring a photoreceptor to threshold.
+  # roughly 600x too weak to bring an input neuron to threshold.
   # Presentation timing, in ms.
   stimulus_ms: 300.0
   rest_ms: 200.0
-  # Randomly permute pixel->photoreceptor assignments (control condition).
+  # Randomly permute pixel->photoreceptor assignments (grid-v1 control only).
   shuffle_pixels: false
   # Seed for the permutation; defaults to the run seed when null.
   shuffle_seed: null
@@ -643,7 +637,9 @@ evaluation:
     - trained
     - shuffled_labels
     - dopamine_off
-    - shuffled_pixels
+    # shuffled_pixels is a grid-v1 (visual) control only; it is meaningless
+    # for odor-v1 inputs, whose pattern is the identity itself, so it is not
+    # listed here.
     - structural_on
     - structural_off
   chance_level: 0.25

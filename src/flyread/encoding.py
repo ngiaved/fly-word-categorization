@@ -1,12 +1,22 @@
-"""Dataset validation, deterministic word rendering, and visual encoding.
+"""Dataset validation, deterministic word rendering, and input encoding.
 
-Words are rendered to a grayscale image with a font bundled in
-``flyread/assets`` (DejaVu Sans Mono, see the bundled license), resampled onto a
-photoreceptor grid, and converted to firing rates and then to input currents.
+Two mutually exclusive input schemes:
 
-``grid-v1`` is a documented simplification of the ommatidial array: the image is
-split into a rectangular grid and each photoreceptor receives the mean darkness
-of its patch. It is not a retinotopic model of the real compound eye.
+* ``grid-v1`` (visual): words are rendered to a grayscale image with a font
+  bundled in ``flyread/assets`` (DejaVu Sans Mono, see the bundled license),
+  resampled onto a photoreceptor grid, and converted to firing rates and then
+  to input currents. This is a documented simplification of the ommatidial
+  array, not a retinotopic model of the real compound eye.
+
+* ``odor-v1`` (olfactory): words name arbitrary odor identities and drive the
+  olfactory input stage directly as deterministic sparse patterns (a seeded
+  subset of active inputs at graded drive, the rest silent). No image is
+  drawn; the pathway being driven is the real ALPN -> Kenyon cell -> MBON
+  chain, which is how the connectome actually carries odor.
+
+Both schemes expose the same ``stimulus(word, config)`` entry point returning
+a per-input-stage activation in [0, 1] that is converted to firing rates and
+then to input currents downstream.
 """
 
 from __future__ import annotations
@@ -27,6 +37,7 @@ from .repro import make_rng
 LOGGER = logging.getLogger(__name__)
 
 SCHEME_GRID_V1 = "grid-v1"
+SCHEME_ODOR_V1 = "odor-v1"
 WORD_LENGTH = 4
 
 
@@ -402,6 +413,120 @@ class GridMapping:
             flat = flat[self.permutation]
         return flat
 
+    def stimulus(self, word: str, config) -> np.ndarray:
+        """Per-photoreceptor activation for a word, rendered and applied."""
+        return self.apply(render_word(word, config))
+
+
+@dataclass
+class OdorMapping:
+    """Word -> sparse olfactory drive for scheme ``odor-v1``.
+
+    Words are arbitrary odor identities. Each category owns a fixed
+    (seeded, disjoint) prototype subset of the input stage, and every word of
+    that category activates a word-specific subset of its category prototype
+    plus a small number of cross-category receptors -- the way the real
+    antenna codes similar odours with overlapping receptor sets, so the class
+    structure exists in the stimulus itself (unlike the visual chain, where
+    rendered words of a category were no more alike than words across
+    categories).
+
+    The draw is keyed on the run seed plus the word, so repeats of a word are
+    bit-identical within a run while different runs can draw different
+    prototypes. ``word_categories`` maps each dataset word to its category
+    index (0..n_categories-1); without it the category is derived from a
+    stable per-word hash so the mapping remains usable for manifest-only
+    construction.
+    """
+
+    scheme_id: str
+    n_inputs: int
+    categories: Sequence[str] = ()
+    word_categories: dict[str, int] | None = None
+    active_from_own: int = 24
+    active_elsewhere: int = 4
+    min_drive: float = 0.35
+    max_drive: float = 1.0
+    seed: int | None = None
+    _prototypes: list[np.ndarray] | None = field(default=None, repr=False)
+
+    @property
+    def n_photoreceptors(self) -> int:
+        """Alias used by the loader's size check (input stage size)."""
+        return self.n_inputs
+
+    @property
+    def active_per_word(self) -> int:
+        return self.active_from_own + self.active_elsewhere
+
+    @property
+    def prototypes(self) -> list[np.ndarray]:
+        if self._prototypes is None:
+            self._prototypes = self._build_prototypes()
+        return self._prototypes
+
+    def _build_prototypes(self) -> list[np.ndarray]:
+        n_categories = max(len(self.categories), 1)
+        rng = make_rng(self.seed or 0, stream="odor-v1-prototypes")
+        shuffled = rng.permutation(self.n_inputs)
+        per = self.n_inputs // n_categories
+        blocks = []
+        for c in range(n_categories):
+            start = c * per
+            end = start + per if c + 1 < n_categories else self.n_inputs
+            blocks.append(np.sort(shuffled[start:end]))
+        return blocks
+
+    def _category(self, word: str) -> int:
+        if self.word_categories is not None and word in self.word_categories:
+            return int(self.word_categories[word])
+        digest = make_rng(self.seed or 0, stream=f"odor-v1-category:{word}")
+        return int(digest.integers(0, max(len(self.categories), 1)))
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "scheme_id": self.scheme_id,
+            "n_inputs": self.n_inputs,
+            "n_categories": len(self.categories),
+            "active_from_own": self.active_from_own,
+            "active_elsewhere": self.active_elsewhere,
+            "active_per_word": self.active_per_word,
+            "prototype_size": self.prototypes[0].size if self.categories else None,
+            "drive_range": [self.min_drive, self.max_drive],
+            "seed": self.seed,
+            "description": (
+                f"{SCHEME_ODOR_V1}: each word is a deterministic sparse pattern "
+                "over the olfactory input stage. Each category owns a seeded "
+                "disjoint prototype subset; a word activates "
+                f"{self.active_from_own} receptors from its category prototype "
+                f"plus {self.active_elsewhere} cross-category receptors, all at "
+                f"graded drive in [{self.min_drive}, {self.max_drive}], the rest "
+                "silent. No image is drawn; words name arbitrary odor identities "
+                "and the per-word pattern is what the plastic readout must learn."
+            ),
+        }
+
+    def apply_word(self, word: str) -> np.ndarray:
+        """Per-input activation for one word (0.0 = silent)."""
+        category = self._category(word)
+        own = self.prototypes[category]
+        rng = make_rng(self.seed or 0, stream=f"odor-v1:{word}:{category}")
+        from_own = rng.choice(own, size=self.active_from_own, replace=False)
+        all_inputs = np.arange(self.n_inputs, dtype=np.int64)
+        elsewhere = np.setdiff1d(all_inputs, own, assume_unique=True)
+        from_out = rng.choice(
+            elsewhere, size=self.active_elsewhere, replace=False
+        )
+        active = np.concatenate([from_own, from_out])
+        drives = rng.uniform(self.min_drive, self.max_drive, size=active.size)
+        out = np.zeros(self.n_inputs, dtype=np.float64)
+        out[active] = drives
+        return out
+
+    def stimulus(self, word: str, config) -> np.ndarray:
+        """Per-input stage activation for one word."""
+        return self.apply_word(word)
+
 
 def _block_means(darkness: np.ndarray, rows: int, cols: int) -> np.ndarray:
     """Mean of each non-overlapping patch in a rows x cols grid.
@@ -425,8 +550,44 @@ def _block_means(darkness: np.ndarray, rows: int, cols: int) -> np.ndarray:
     return out
 
 
-def make_mapping(config, seed: int | None = None) -> GridMapping:
-    """Build the photoreceptor mapping, optionally shuffled (control)."""
+def make_mapping(config, seed: int | None = None, n_inputs: int | None = None, dataset=None):
+    """Build the input mapping for the configured scheme, optionally shuffled (control).
+
+    ``grid-v1`` maps pixels onto photoreceptors; ``odor-v1`` maps words onto a
+    sparse, category-conditioned olfactory pattern. The returned object exposes
+    ``stimulus(word, config)`` for both, returning the per-input activation the
+    stimulator converts to currents. ``n_inputs`` overrides the configured
+    input count (used so the odor mapping always drives the exact simulated
+    input stage size; the config value is the cap). ``dataset`` (with its
+    per-word category labels, when not None) lets odor-v1 build word ->
+    category assignments for the prototype structure.
+    """
+    scheme_id = config.get("encoding.scheme_id")
+    if scheme_id == SCHEME_ODOR_V1:
+        odor = config.get("encoding.odor")
+        word_categories = None
+        if dataset is not None:
+            word_categories = {
+                item.word: int(item.label) for item in dataset.items
+            }
+        mapping = OdorMapping(
+            scheme_id=scheme_id,
+            n_inputs=int(odor["n_inputs"]) if n_inputs is None else int(n_inputs),
+            categories=list(config.get("encoding.categories")),
+            word_categories=word_categories,
+            active_from_own=int(odor["active_from_own"]),
+            active_elsewhere=int(odor["active_elsewhere"]),
+            min_drive=float(odor.get("min_drive", 0.35)),
+            max_drive=float(odor.get("max_drive", 1.0)),
+            seed=int(seed) if seed is not None else None,
+        )
+        LOGGER.info(
+            "odor-v1 mapping: %d inputs, %d own + %d elsewhere per word, "
+            "drive %.2f-%.2f, seed %s",
+            mapping.n_inputs, mapping.active_from_own, mapping.active_elsewhere,
+            mapping.min_drive, mapping.max_drive, mapping.seed,
+        )
+        return mapping
     rows = int(config.get("encoding.grid_rows"))
     cols = int(config.get("encoding.grid_cols"))
     size = config.get("encoding.image_size_px")

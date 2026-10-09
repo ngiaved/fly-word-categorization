@@ -30,11 +30,14 @@ from .repro import verify_checksum
 
 LOGGER = logging.getLogger(__name__)
 
+# Stage names treated as the output readout / teaching signal, plus the
+# mushroom-body role. The INPUT stage is not named here: the first stage in
+# ``subcircuit.stages`` (signal order) is the input layer, whatever its name
+# (``photoreceptor`` for the visual chain, ``olfactory`` for the odor path).
 ROLE_PHOTORECEPTOR = "photoreceptor"
 ROLE_MUSHROOM_BODY = "mushroom_body"
 ROLE_OUTPUT = "output"
 
-# Stage names treated as the visual input layer.
 INPUT_STAGES: tuple[str, ...] = (ROLE_PHOTORECEPTOR,)
 # Stage names treated as the mushroom body.
 MUSHROOM_BODY_STAGES: tuple[str, ...] = ("mushroom_body",)
@@ -157,7 +160,7 @@ class Subcircuit:
 
     def _pair_counts(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
-        for *_, role_pair in self.edges:
+        for _, _, _, _, role_pair, _art in self.edges:
             counts[role_pair] += 1
         return counts
 
@@ -728,10 +731,6 @@ def read_stages(config) -> list[dict[str, Any]]:
         if not isinstance(cap, int) or cap <= 0:
             raise SchemaError(f"stage {name!r} needs a positive integer cap, got {cap!r}")
         out.append({"name": name, "rules": rules, "cap": cap})
-    if INPUT_STAGES[0] not in seen:
-        raise SchemaError(
-            f"subcircuit.stages must include an input stage named {INPUT_STAGES[0]!r}"
-        )
     if not set(MUSHROOM_BODY_STAGES) & seen:
         raise SchemaError(
             "subcircuit.stages must include a mushroom body stage "
@@ -769,7 +768,7 @@ def extract_subcircuit(config, manifest=None) -> Subcircuit:
         ids = select_role(neurons, stage["rules"], restrict_side=restrict_side)
         candidates[stage["name"]] = ids
         LOGGER.info("stage %-15s %6d candidates", stage["name"], len(ids))
-        if not ids and stage["name"] not in INPUT_STAGES:
+        if not ids and stage["name"] != stages[0]["name"]:
             raise SchemaError(
                 f"no neurons matched subcircuit.stages[{stage['name']}].rules = "
                 f"{stage['rules']}; check the annotation rules against the real schema"
@@ -1346,12 +1345,12 @@ def _check_reachability(
                 adjacency[pre].add(post)
         return adjacency
 
-    pr_internal = set(subcircuit.roles.get(ROLE_PHOTORECEPTOR, []))
+    input_internal = set(subcircuit.roles[list(subcircuit.roles)[0]])
     out_internal = set(subcircuit.roles.get(ROLE_OUTPUT, []))
 
     def probe(include_artificial: bool) -> tuple[set[int], int]:
         reached = _reachable(
-            adjacency_for(include_artificial), pr_internal, max_hops
+            adjacency_for(include_artificial), input_internal, max_hops
         )
         return reached, len(out_internal & reached)
 
@@ -1386,7 +1385,8 @@ def _check_reachability(
         "output_selection_rule": output_rule,
         "note": (
             "Reachability is computed on excitatory edges only, within "
-            f"{max_hops} hops of the photoreceptor population. 'with_bridge' "
-            "includes the synthetic bridge; 'real_edges_only' does not."
+            f"{max_hops} hops of the input population (the first stage in "
+            "subcircuit.stages). 'with_bridge' includes the synthetic bridge; "
+            "'real_edges_only' does not."
         ),
     }

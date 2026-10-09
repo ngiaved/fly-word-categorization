@@ -24,7 +24,10 @@ a separate change is opened; the spec is not silently relaxed.
 
 ## What Changes
 - New Brian2 simulation pipeline using a pinned FlyWire release
-- Visual encoding of words into photoreceptor spike input
+- Input encoding of words, with two selectable schemes:
+  - `grid-v1`: render the word and map pixels onto photoreceptor spike input
+  - `odor-v1` (default): treat the word as an odor identity and drive a sparse
+    pattern onto the real olfactory (ALPN) input stage
 - Dopamine-modulated plasticity in mushroom body synapses
 - Structural plasticity: synaptic pruning, neuron silencing, and neuron
   recruitment from a pre-allocated reserve pool (Brian2 NeuronGroups have
@@ -35,10 +38,20 @@ a separate change is opened; the spec is not silently relaxed.
 ## Capabilities (new)
 - connectome-loading
 - visual-encoding
+- odor-encoding
 - dopamine-learning
 - structural-plasticity
 - evaluation
 - reproducibility
+
+## Scope revision [TO CONFIRM]
+The original proposal assumed a visual pathway (photoreceptors -> optic lobe ->
+mushroom body). Measurement of FlyWire release 783 showed that pathway does not
+exist: the mushroom body receives essentially no optic-lobe input (1 synapse
+from lobula, 2 from medulla). The visual task therefore required synthetic
+connections and produced a null result. The default task was revised to the
+real olfactory pathway (`ALPN -> Kenyon cell -> MBON`), which needs no synthetic
+edges. `visual-encoding` and `grid-v1` are retained for the visual code path.
 
 ## Non-goals
 - Any claim about consciousness

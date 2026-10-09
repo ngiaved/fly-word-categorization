@@ -402,7 +402,8 @@ def run_condition(
 
     run_config, settings = condition_config(config, condition)
     network = build_network(subcircuit, run_config, weight_scale=weight_scale)
-    mapping = make_mapping(run_config, seed=seed)
+    input_count = len(subcircuit.roles[list(subcircuit.roles)[0]])
+    mapping = make_mapping(run_config, seed=seed, n_inputs=input_count, dataset=dataset)
     if manifest is not None:
         # Per-condition encoding record: conditions can override the grid or
         # enable the shuffled-pixel control, so the base manifest entry is not

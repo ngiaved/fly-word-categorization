@@ -24,10 +24,9 @@ import numpy as np
 
 from .encoding import (
     GridMapping,
+    OdorMapping,
     darkness_to_rate,
-    encode_word,
     rate_to_current,
-    render_word,
 )
 from .network import SimulationNetwork, clear_monitors
 from .repro import make_rng
@@ -584,7 +583,7 @@ class TrialRunner:
 
     network: SimulationNetwork
     config: Any
-    mapping: GridMapping
+    mapping: GridMapping | OdorMapping
     seed: int
     input_gain: float = 1.0
     tie_break: str = "seeded"
@@ -629,8 +628,7 @@ class TrialRunner:
 
     # -- input ----------------------------------------------------------
     def _apply_stimulus(self, word: str) -> np.ndarray:
-        image = render_word(word, self.config)
-        darkness = self.mapping.apply(image)
+        darkness = self.mapping.stimulus(word, self.config)
         if bool(self.config.get("network.direct_input.enabled")):
             return self._apply_direct_input(darkness)
         rates = darkness_to_rate(darkness, self.config)
@@ -667,19 +665,16 @@ class TrialRunner:
         self._photoreceptor_group().I_syn = 0.0
 
     def _photoreceptor_group(self):
-        """The Brian2 NeuronGroup that receives the visual drive.
+        """The Brian2 NeuronGroup that receives the input drive (first stage).
 
         ``network.stages`` maps a role name to a ``StageGroup`` wrapper, not to
         the Brian2 group. Assigning ``I_syn`` on the wrapper would silently
         create a plain Python attribute and leave the simulated neuron
-        untouched, so the underlying group must be unwrapped here.
+        untouched, so the underlying group must be unwrapped here. The first
+        stage in signal order is the input layer (``photoreceptor`` for the
+        visual chain, ``olfactory`` for the odor path).
         """
-        from .connectome import INPUT_STAGES
-
-        for name in INPUT_STAGES:
-            if name in self.network.stages:
-                return self.network.stages[name].group
-        raise LearningError("network has no photoreceptor group to drive")
+        return next(iter(self.network.stages.values())).group
 
     # -- one trial ------------------------------------------------------
     def _present(self, word: str) -> tuple[np.ndarray, dict[str, float], np.ndarray]:

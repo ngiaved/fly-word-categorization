@@ -37,6 +37,10 @@ report) require the completed foreground experiment runs and remain open.
 - [x] 3.5 Rate-to-current function with documented units [visual-encoding]
 - [x] 3.6 Presentation timing and inter-trial state reset [visual-encoding]
 - [x] 3.7 Shuffled-pixel control [visual-encoding]
+- [x] 3.8 `odor-v1` sparse category-conditioned word encoding, with scheme id in manifest [odor-encoding]
+- [x] 3.9 `OdorMapping`/`GridMapping` share `stimulus(word, config)`; input stage is the first configured stage [odor-encoding]
+- [x] 3.10 Default subcircuit switched to `olfactory -> mushroom_body -> reinforcement -> output` with bridge and readout disabled [odor-encoding]
+- [x] 3.11 Odor mapping size overridden to the selected input-stage size (685 cap -> 673 selected) [odor-encoding]
 
 ## 4. Network and calibration
 - [x] 4.1 Build Brian2 LIF network from subcircuit, with reserve pool [dopamine-learning, structural-plasticity]
@@ -76,8 +80,9 @@ report) require the completed foreground experiment runs and remain open.
 
 ## 9. Reproduction and reporting
 - [x] 9.1 Single documented command sequence from clean checkout to report [reproducibility]
-- [x] 9.2 Final report, including negative or null results explicitly [evaluation] -> docs/final-report.md (real 2-seed run is a null result; three-axis probe sweep confirms the readout stays at chance)
+- [x] 9.2 Final report, including negative or null results explicitly [evaluation] -> docs/final-report.md (visual 2-seed run and odor 1-seed reduced run are both null results; probe sweeps confirm the visual readout stays at chance)
 - [ ] 9.3 Run `openspec validate` (and verify/archive per your OpenSpec version) after implementation
+- [ ] 9.4 Formal >= 10-seed `odor-v1` run and report (the 1-seed run is a diagnostic only)
 
 ## Open items [TO CONFIRM]
 - Significance level and number of seeds beyond 10

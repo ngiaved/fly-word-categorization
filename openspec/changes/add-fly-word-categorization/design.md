@@ -11,10 +11,15 @@ is original, unvalidated design.
 See proposal.md. Key constraint: CPU laptop, research-grade reproducibility.
 
 ## Architecture
+Two input schemes share the pipeline below; `odor-v1` is the default and
+`grid-v1` is the retained visual variant (D7, D10).
+
 ```
 word (text)
-  -> visual-encoding: render -> pixel grid -> photoreceptor rates -> currents
-  -> connectome-loading: subcircuit (photoreceptors ... mushroom body ... outputs)
+  -> encoding:
+       grid-v1: render -> pixel grid -> photoreceptor rates -> currents
+       odor-v1: sparse category-conditioned pattern -> olfactory input currents
+  -> connectome-loading: subcircuit (input stage ... mushroom body ... outputs)
   -> Brian2 LIF simulation (CPU)
   -> readout: spike counts of 4 designated output neurons -> predicted category
   -> dopamine-learning: reward/punishment gates eligibility-trace weight updates
@@ -106,6 +111,33 @@ word-class signal is lost in the mushroom body under the calibrated regime, so
 no readout-drive choice recovers it. Per-class credit and the
 recruits-as-decoder-features decisions remain valid design choices; whether they
 give a measurable payoff is now unconfirmed (see docs/final-report.md).
+
+### D10: Default task moved to the real olfactory pathway (odor-v1)
+Reason: the visual chain measured in release 783 cannot be built from real
+connectivity (D7 / final report); the mushroom body is not a visual target in
+*Drosophila*. The olfactory pathway is the densest real feed-forward route into
+the mushroom body (`ALPN -> Kenyon cell` 329,394 synapses; `Kenyon cell -> MBON`
+256,719), so it removes both synthetic components the visual task needed.
+- Words are arbitrary odor identities, encoded as deterministic sparse
+  patterns over the `ALPN` input stage. Each category owns a fixed seeded
+  prototype subset; a word activates `active_from_own` inputs from its own
+  prototype plus `active_elsewhere` cross-category inputs. The shared prototype
+  puts the class structure in the stimulus itself, which rendered words did not
+  have.
+- The input stage is identified as the first stage in `subcircuit.stages`
+  (signal order), not by the literal name `photoreceptor`; the trial runner
+  drives that stage and `make_mapping` returns a `GridMapping` or `OdorMapping`,
+  both exposing `stimulus(word, config)`.
+- `subcircuit.bridge` and `subcircuit.readout` are disabled by default, so the
+  simulated subcircuit (1,065 neurons, 23,075 edges) is entirely real FlyWire
+  connectivity.
+- Status: measured null at reduced power (1 seed, 100 trials): trained 0.100 vs
+  untrained 0.250. The output stage is no longer silent, so the remaining
+  bottleneck is the dopamine-gated `mushroom body -> output` readout, not the
+  input encoding. The formal >= 10-seed run is still required. Also note the
+  real `DAN -> mushroom body` edges are extracted (372) but not simulated
+  because `reinforcement` is configured after `mushroom_body`; the teacher is a
+  global scalar gated by real `DAN` spikes (see README Known issues 9).
 
 ## Module layout
 ```
