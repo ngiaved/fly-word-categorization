@@ -119,6 +119,19 @@ def test_significance_handles_identical_seeds_at_chance():
     assert "note" in payload, "the degenerate case must be explained"
 
 
+def test_significance_zero_variance_off_chance_is_not_significant():
+    # Two (or more) seeds landing on the SAME accuracy give an infinite t
+    # statistic, not evidence: there is no variance from which to infer. Scipy
+    # would return p = 0 and the report would claim the opposite of what the
+    # data support, so zero variance must never be reported as significant.
+    cfg, _ = _dataset()
+    result = evaluate.test_against_chance([0.283] * 2, chance=0.25, level=0.01)
+
+    assert result.significant is False
+    assert result.p_value == 1.0
+    assert "zero variance" in result.note
+
+
 def test_significance_requires_at_least_two_seeds():
     cfg, _ = _dataset()
     try:
@@ -222,3 +235,65 @@ def test_negative_result_is_stated_explicitly():
     assert "NOT significantly above" in headline
     assert "negative or null result" in headline
     assert report.conditions["trained"]["significant"] is False
+
+
+def _growth_summary(recruits=200, created=11000, removed=100):
+    return {
+        "enabled": True,
+        "events_by_kind": {"recruit": recruits, "prune": removed, "silence": 0},
+        "stats": {
+            "recruits": recruits,
+            "expansion_pruned_total": removed,
+            "retired_total": removed,
+        },
+        "reserve": {
+            "size": 1000,
+            "recruited": recruits,
+            "available": 1000 - recruits,
+            "expansion_synapses": created,
+            "readout_units": recruits,
+            "prune_target": removed,
+        },
+        "note": "recruitment rule",
+    }
+
+
+def test_structural_growth_section_reports_final_counts():
+    # Requirement: report final neuron/synapse counts after growth
+    seed_results = _seed_results(lambda c, o: 0.30)
+    grown = seed_results[0].results["structural_on"]
+    grown.structural = _growth_summary()
+
+    section = report_mod.structural_growth_section(
+        seed_results, {"n_neurons": 1928, "n_edges": 21233}
+    )
+
+    assert "## Structural growth" in section
+    # base 1928 + 200 recruits; base 21233 + (11000 - 100) net synapses
+    assert "2128" in section  # final neurons
+    assert "10900" in section  # net new synapses
+    assert "32133" in section  # 21233 + 10900 final synapses
+    assert "recruit" in section.lower()
+
+
+def test_structural_growth_section_empty_without_growth():
+    seed_results = _seed_results(lambda c, o: 0.30)
+    section = report_mod.structural_growth_section(
+        seed_results, {"n_neurons": 1928, "n_edges": 21233}
+    )
+    assert section == ""
+
+
+def test_report_markdown_includes_growth_when_present():
+    cfg, dataset = _dataset()
+    seed_results = _seed_results(lambda c, o: 0.30)
+    seed_results[0].results["structural_on"].structural = _growth_summary()
+    report = evaluate.aggregate(
+        seed_results, dataset, cfg, metadata={"base_seed": 1000}
+    )
+
+    markdown = report_mod.build_markdown(
+        report, seed_results, dataset.categories,
+        {"flywire_release": "783", "n_neurons": 1928, "n_edges": 21233},
+    )
+    assert "## Structural growth" in markdown

@@ -64,6 +64,52 @@ The system SHALL clip plastic weights to configured lower and upper bounds.
 - WHEN the weight reaches the upper bound
 - THEN it does not exceed the bound
 
+### Requirement: Per-class credit assignment
+The system SHALL support per-output credit so a wrong trial punishes the chosen
+output and rewards the correct one in the same trial, instead of applying one
+global scalar to every plastic synapse. A scalar (global) mode remains
+available; the configured default is per-class
+(`learning.credit_assignment = per_class`).
+
+The per-class valence vector is a "perceptron-style" correction: the wrong
+readout is depressed while the correct one is potentiated on the same trial.
+The three-factor rule is preserved because the valence is gated by the real
+reinforcement-neuron response (`_deliver_teaching`), so the update never runs
+unless genuine reinforcement neurons spike.
+
+#### Scenario: Correct trial
+- GIVEN a per-class trial whose predicted category equals the true category
+- WHEN the update runs
+- THEN only the winning (correct) output's synapses are potentiated by the
+  reward magnitude
+
+#### Scenario: Wrong trial corrects both poles
+- GIVEN a per-class trial whose predicted category differs from the true category
+- WHEN the update runs
+- THEN the chosen (wrong) output's synapses are depressed by the punishment
+  magnitude
+- AND the true output's synapses are potentiated by the reward magnitude in
+  the same trial
+
+#### Scenario: Teacher gating still applies
+- GIVEN a per-class trial
+- WHEN the reinforcement neurons do not fire (gate 0)
+- THEN the valence vector is zeroed before the update, so no plastic weight
+  changes (the RNA-mode update remains genuinely three-factor)
+
+### Requirement: Credit magnitudes do not change the teacher drive
+The reward and punishment magnitudes (`learning.reward`, `learning.punishment`)
+SHALL set the per-output credit floor and the dopamine VALUE only; the teacher
+gate saturates at 1.0 because the reinforcement stage is driven at fixed
+currents. This lets baseline tuning (e.g. lowering punishment potency) shift the
+readout projection without breaking the neuron-gated plasticity.
+
+#### Scenario: Magnitude affects credit, not gate
+- GIVEN reward 1.5 / punishment -0.5
+- WHEN a reward trial runs
+- THEN the winning output is potentiated with magnitude 1.5
+- AND the teacher gate is still the real spike-ratio gate (saturating at 1.0)
+
 ### Requirement: Readout
 The system SHALL predict a category as the output neuron with the highest
 spike count during the response window, breaking ties with a seeded

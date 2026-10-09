@@ -267,6 +267,7 @@ def cmd_train(args, config: Config) -> int:
 
     _network, calibration = calibrate(subcircuit, config, manifest=manifest)
     manifest.calibration = calibration.as_dict()
+    run_config = calibration.apply_drive(config)
 
     split = make_split(
         dataset,
@@ -276,7 +277,7 @@ def cmd_train(args, config: Config) -> int:
     )
     condition = args.condition
     result = run_condition(
-        condition, dataset, split, seed, config,
+        condition, dataset, split, seed, run_config,
         calibration.weight_scale, subcircuit, manifest=manifest,
     )
     manifest.metrics = {"condition": condition, **result.as_dict(include_records=True)}
@@ -311,6 +312,7 @@ def cmd_evaluate(args, config: Config) -> int:
     _network, calibration = calibrate(subcircuit, config, manifest=manifest)
     manifest.calibration = calibration.as_dict()
     weight_scale = calibration.weight_scale
+    run_config = calibration.apply_drive(config)
 
     conditions = list(config.get("evaluation.conditions"))
     n_seeds = int(getattr(args, "n_seeds", None) or config.get("evaluation.n_seeds"))
@@ -324,6 +326,10 @@ def cmd_evaluate(args, config: Config) -> int:
 
     started = time.perf_counter()
     all_results = []
+    # Checkpoint as conditions finish so a killed run still leaves every
+    # completed (seed, condition) accuracy on disk, and the live log shows
+    # numbers instead of only "starting condition X" lines.
+    checkpoint = run_dir / "seed_conditions.jsonl"
     for index, run_seed in enumerate(seeds, start=1):
         seed_everything(run_seed)
         split = make_split(
@@ -336,9 +342,24 @@ def cmd_evaluate(args, config: Config) -> int:
         for condition in conditions:
             LOGGER.info("[%d/%d] seed %d condition %s", index, n_seeds, run_seed, condition)
             per_condition[condition] = run_condition(
-                condition, dataset, split, run_seed, config, weight_scale, subcircuit,
-                manifest=manifest,
+                condition, dataset, split, run_seed, run_config, weight_scale,
+                subcircuit, manifest=manifest,
             )
+            finished = per_condition[condition]
+            LOGGER.info(
+                "[%d/%d] seed %d condition %-14s test acc %.3f "
+                "(no-response %.3f)",
+                index, n_seeds, run_seed, condition,
+                finished.test_accuracy, finished.test_no_response_rate,
+            )
+            with checkpoint.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {"seed": run_seed, **finished.as_dict(include_records=False)},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
         from .evaluate import SeedResult
 
         all_results.append(

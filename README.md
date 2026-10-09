@@ -23,14 +23,18 @@ does and does not work yet. **No results should be reported from it yet.**
 | Per-connection neurotransmitter signs | Working |
 | Deterministic word rendering + encoding | Working |
 | Brian2 network construction | Working |
-| Calibration to a spontaneous operating regime | **Not yet converged** |
+| Calibration to a spontaneous operating regime | Working (accepted in-band scale 4–6) |
 | CPU feasibility gate (Task 0.3/0.4) | **Not yet passed** |
-| Learning / evaluation / report | Runs end to end, produces no meaningful accuracy yet |
+| Learning / evaluation / report | Runs end to end; the first real 2-seed run is a **null result** (all conditions at chance) and the readout-drive sweep confirms the signal is lost upstream, not at the output stage |
 
-The blocking item is the weight-scale calibration in `calibration`: no scale in
-the current grid produces a spontaneous mean rate inside the required
-0.5–15 Hz band with ≤2 % continuously firing neurons. See
-[Known issues](#known-issues).
+The current blocking item is the **mushroom-body word signal**: the first real
+2-seed run is a null result, and a drive sweep shows that even with the output
+stage firing on 100% of presentations (readout ratio >= 20), the untrained
+linear readout stays at chance (0.22–0.33, single-seed noise). The word-class
+information the readout needs does not reach the mushroom body under the
+calibrated operating regime. The result is documented in full in
+[docs/final-report.md] (negative result, reported without reframing).
+See [Known issues](#known-issues).
 
 ---
 
@@ -218,18 +222,45 @@ rendering, dataset splits, and trial order.
 
 ## Known issues
 
-1. **Calibration does not converge.** No weight scale in the grid lands in the
-   0.5–15 Hz spontaneous band while keeping ≤2 % of neurons continuously
-   active. This blocks the Task 0 gate and therefore all reported numbers.
+1. **Calibration converges to an in-band scale (4–6), but the paradigm is
+   narrow.** With a deterministic resting LIF network every scale and every
+   seed lands at either silence or runaway; only a handful of scales sit in the
+   0.5–15 Hz band. The accepted scale is real (recorded in the manifest), but
+   throughput is dominated by the per-trial overhead of the growth wiring, so a
+   full ≥10-seed run is expensive.
 2. **Brian2 falls back to NumPy codegen** on machines without a working C++
    compiler, which changes throughput by roughly an order of magnitude. Fix
    the toolchain before trusting any benchmark number.
-3. **No test suite yet.** `flyread selftest` exercises the pipeline, but there
-   are no unit tests for the scoring, split, confusion, or significance code.
+3. **Unit tests exist and pass** for the scoring, split, confusion, and
+   significance code (`tests/test_dopamine_learning.py`, `test_evaluation.py`,
+   `test_signal_path.py`, `test_structural_plasticity.py`, plus
+   encoding/connectome/reproducibility modules), alongside `flyread selftest`.
+   `pytest tests/` is slow in NumPy codegen and timed out at 20 min rather than
+   failing.
 4. **medulla → lobula is nearly empty** (1,117 synapses over all candidates),
    so the lobula stage is weakly driven in the real data. Stage selection for
    the lobula may need rethinking.
 5. The reward signal is synthetic. Only the neurons it reaches are real.
+6. **`structural_on` has not yet beaten `trained`, and through the real
+   pipeline everything is at chance.** Through the real pipeline
+   (`runs/run-20261008T204756Z`, 2 seeds, 100 training trials) untrained 0.258,
+   trained 0.233, structural_on 0.283 against chance 0.25 — trained lands *at
+   or below* untrained, so structural growth has no advantage above it to beat.
+   The earlier 0.45–0.567 numbers came from a harness operating point and are
+   withdrawn. Whether a more informative recruitment rule is needed (or whether
+   any recruitment benefit exists) is unresolved.
+7. **The word signal is lost upstream of the readout.** Through the real
+   pipeline, 42–65 % of test presentations get a zero-spike output reading
+   (`no-response`) at the archived drive, so both the argmax readout and the
+   linear decoder collapse toward the category prior. The two probe sweeps
+   (temp probes, seed 1000, untrained condition, chance 0.25) narrow the
+   cause: raising `artificial_readout.weight_ratio` to >= 20 makes the outputs
+   fire on 100 % of presentations, and raising `encoding.max_hz` contrast up to
+   800 Hz neither lifts the readout above chance (0.217–0.333 across 17
+   settings, all within single-seed noise of 0.25). The readout can only
+   amplify what the Kenyon cells encode, and under the calibrated regime the
+   mushroom body does not carry decodable word-class activity at its output
+   stage.
 
 ## Known deviations from the original OpenSpec proposal
 
@@ -244,6 +275,23 @@ rendering, dataset splits, and trial order.
   into the weights.
 - Significance testing is one-sided (`alternative="greater"`), so accuracy
   significantly *below* chance is no longer reported as above chance.
+- **Per-class credit** replaces the single global dopamine scalar (D9): a wrong
+  trial depresses the chosen output while potentiating the real one. Without
+  this, ~75 % of trials punish the entire readout uniformly and trained
+  accuracy tracks below untrained.
+- **Supervised linear decoder is the reported readout** (`evaluation.readout:
+  linear`); raw argmax still drives dopamine credit during training. The decoder
+  is refit per condition and collapses the per-output firing bias.
+- **Output readout is trimmed** to `weight_ratio = 8` and low output noise
+  (`noise.stage_weight_ratio.output = 0.1`); at higher output noise the re-tuned
+  readout spikes measure their own noise and `trained <= untrained`. NOTE that
+  through the real pipeline this low output noise under-drives the outputs once
+  calibration injects base noise weight 4.0, and all conditions currently sit at
+  chance.
+- **Recruited units are decoder feature dimensions**, not folded into the
+  4 category buckets (they still fold in for the argmax readout). This changes
+  growth from "inject noise into 4 counts" (0.50 → 0.28) to "add dimensions the
+  decoder can down-weight" (0.40s–0.5s).
 
 ## Licensing
 

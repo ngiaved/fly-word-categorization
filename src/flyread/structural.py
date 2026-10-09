@@ -61,6 +61,10 @@ class StructuralStats:
     # plastic pathway. Kept separate so the recessive pruning budget can be
     # tracked against the number of recruited neurons.
     expansion_pruned_total: int = 0
+    # Deletions forced by the retirement rule to track additions even when the
+    # weight-threshold gate has nothing below it. A subset of
+    # expansion_pruned_total.
+    retired_total: int = 0
     silenced_total: int = 0
     reserve_available: int = 0
     reserve_warning_logged: bool = False
@@ -77,6 +81,7 @@ class StructuralStats:
             "recruits": self.recruits,
             "pruned_total": self.pruned_total,
             "expansion_pruned_total": self.expansion_pruned_total,
+            "retired_total": self.retired_total,
             "silenced_total": self.silenced_total,
             "reserve_available": self.reserve_available,
             "reserve_warning_logged": self.reserve_warning_logged,
@@ -131,6 +136,22 @@ class StructuralPlasticity:
             config.get("structural.max_total_fraction_silenced")
         )
 
+        rec = config.get("structural.recruitment") or {}
+        self.divergence = float(rec.get("divergence", 0.85))
+        self.anchor_top_fraction = float(rec.get("anchor_top_fraction", 0.25))
+        self.success_window = int(rec.get("success_window", 200))
+        self.enforce_unique = bool(rec.get("enforce_unique_inputs", True))
+        self.gain_mode = str(rec.get("gain", "average"))
+        self.force_retire = bool(rec.get("force_retire", True))
+        self.retirement_min_age = int(rec.get("retirement_min_age", 1))
+
+        # Input-set signatures ever used, so "no two neurons look the same".
+        self._input_signatures: set[frozenset[int]] = set()
+        # Per-synapse intervals since recruitment, so retirement spares brand-
+        # new neurons until they have had a training window. One entry per
+        # synapse in ``network.expansion_plastic``.
+        self._retire_age: np.ndarray = np.zeros(0, dtype=np.int64)
+
         self.plastic = network.plastic
         self.syn = network.synaptic_groups[self.plastic.role_pair]
         self.total_plastic = int(self.plastic.weights.size)
@@ -146,9 +167,18 @@ class StructuralPlasticity:
         # reserve synapse set, kept separate from the measured set's counters.
         self._expansion_below_count: np.ndarray | None = None
         # Readout categories. Recruited reserve neurons join these as extra
-        # readout units, assigned round-robin, so a new neuron contributes to
-        # one category's spike total.
+        # readout units, assigned the category of their anchor (the most
+        # successful output unit), so growth reinforces the winning class
+        # instead of injecting round-robin noise.
         self.n_categories = int(len(network.output_indices)) or 1
+        # Rolling winner-conditional reward per output unit; drives anchoring.
+        self._winner_ema: np.ndarray = np.zeros(self.n_categories, dtype=np.float64)
+        self._winner_seen: np.ndarray = np.zeros(self.n_categories, dtype=np.int64)
+        # Per-reserve-unit readout category ledger, shared with the readout so
+        # it credits a recruited neuron to the correct category. -1 = unborn.
+        network.reserve_categories = np.full(
+            int(network.reserve.N), -1, dtype=np.int64
+        )
 
         self._reserve_stage = self._make_reserve_stage()
         self._reserve_stage_attached = False
@@ -254,6 +284,25 @@ class StructuralPlasticity:
                 float(stage_rate_hz[stage])
             )
 
+    def observe_trial(self, responder: int | None, reward_type: str | None) -> None:
+        """Record one trial's winner-conditional reward for anchoring.
+
+        ``responder`` is the argmax output unit that produced the response and
+        ``reward_type`` is the pre-baseline teacher outcome ("reward",
+        "punishment", or "none"). A rolling EMA per output unit scores how
+        successful that readout unit has been, which recruitment uses to pick
+        its anchor. Called once per trial by the evaluation loop.
+        """
+        if responder is None or responder < 0:
+            return
+        unit = int(responder)
+        if unit >= self.n_categories:
+            return
+        value = {"reward": 1.0, "punishment": -1.0}.get(reward_type, 0.0)
+        alpha = 1.0 / self.success_window if self.success_window > 0 else 0.0
+        self._winner_seen[unit] += 1
+        self._winner_ema[unit] = (1.0 - alpha) * self._winner_ema[unit] + alpha * value
+
     # -- the step -------------------------------------------------------
     def maybe_step(self, trial: int) -> list[StructuralEvent]:
         """Run one structural check if this trial is on the schedule."""
@@ -272,6 +321,16 @@ class StructuralPlasticity:
         """
         self.stats.intervals += 1
         produced: list[StructuralEvent] = []
+        # Age every reserve synapse before this interval's recruitment, so a
+        # freshly added neuron must survive a full interval before retirement.
+        expansion = getattr(self.network, "expansion_plastic", None)
+        if expansion is not None and expansion.active.size:
+            if self._retire_age.size != expansion.active.size:
+                self._retire_age = np.zeros(
+                    expansion.active.size, dtype=np.int64
+                )
+            size = int(expansion.active.size)
+            self._retire_age[:size] += expansion.active[:size]
         produced.extend(self._prune(trial))
         produced.extend(self._silence(trial))
         if self.recruit_every > 0 and self.stats.intervals % self.recruit_every == 0:
@@ -374,6 +433,9 @@ class StructuralPlasticity:
         below = np.flatnonzero(below_mask)
         self.stats.candidate_totals["prune_reserve"] = int(below.size)
 
+        if self._retire_age.size != weights.size:
+            self._retire_age = np.zeros(weights.size, dtype=np.int64)
+
         if self._expansion_below_count is None or (
             len(self._expansion_below_count) != weights.size
         ):
@@ -387,17 +449,42 @@ class StructuralPlasticity:
             )
         else:
             eligible = below
-        if eligible.size == 0:
-            return []
-
         target = int(np.floor(self.prune_per_recruit * self._recruited))
         remaining = target - self.stats.expansion_pruned_total
         if remaining <= 0:
             return []
 
-        chosen = self._cap(
-            eligible, self.max_prunes, remaining, self.stats, "prune"
+        chosen = (
+            self._cap(eligible, self.max_prunes, remaining, self.stats, "prune")
+            if eligible.size else np.array([], dtype=np.int64)
         )
+
+        # Forced retirement: with pseudorandom average-gain recruits, the
+        # weight-threshold gate rarely fires (recruits bootstrap near the
+        # population mean), so deletions would stay far below additions. When
+        # force_retire is on, top up the interval budget with the weakest
+        # active reserve synapses so deletions deterministically track
+        # ``prune_per_recruit`` additions.
+        forbid = set(int(i) for i in chosen)
+        retired = np.array([], dtype=np.int64)
+        if self.force_retire and int(chosen.size) < self.max_prunes:
+            budget = min(
+                self.max_prunes - int(chosen.size),
+                max(0, int(remaining) - int(chosen.size)),
+            )
+            if budget > 0:
+                mature = np.flatnonzero(
+                    active & (self._retire_age >= self.retirement_min_age)
+                )
+                candidates = np.array(
+                    [i for i in mature if i not in forbid], dtype=np.int64
+                )
+                if candidates.size:
+                    order = np.argsort(weights[candidates], kind="stable")
+                    retired = candidates[order][:budget]
+                    if retired.size:
+                        chosen = np.concatenate([chosen, retired])
+
         if chosen.size == 0:
             return []
 
@@ -408,6 +495,9 @@ class StructuralPlasticity:
         self.stats.prunes += int(chosen.size)
         self.stats.pruned_total += int(chosen.size)
         self.stats.expansion_pruned_total += int(chosen.size)
+        self.stats.retired_total += int(retired.size)
+
+        retired_set = set(int(i) for i in retired)
         events = []
         for position, synapse_id in enumerate(chosen.tolist()):
             events.append(StructuralEvent(
@@ -419,11 +509,20 @@ class StructuralPlasticity:
                     "post_index": int(expansion.post_indices[synapse_id]),
                     "weight_before": float(weights_before[position]),
                     "weight_after": 0.0,
-                    "threshold_ratio": self.prune_weight_ratio,
-                    "consecutive_checks": self.prune_checks,
+                    "threshold_ratio": (
+                        self.prune_weight_ratio
+                        if synapse_id not in retired_set else None
+                    ),
+                    "consecutive_checks": (
+                        self.prune_checks if synapse_id not in retired_set else 0
+                    ),
+                    "retired": synapse_id in retired_set,
                 },
             ))
-        LOGGER.info("trial %d: pruned %d reserve synapses", trial, chosen.size)
+        LOGGER.info(
+            "trial %d: pruned %d reserve synapses (%d by retirement)",
+            trial, chosen.size, int(retired.size),
+        )
         return events
 
     # -- silencing ------------------------------------------------------
@@ -514,6 +613,102 @@ class StructuralPlasticity:
         return int(targets.size)
 
     # -- recruitment ----------------------------------------------------
+    def _anchor_category(self) -> int:
+        """Index of the most successful readout unit (rolling reward).
+
+        Only outputs that have actually responded are eligible; before any
+        reinforceable trials the first output is the deterministic fallback.
+        """
+        eligible = self._winner_seen > 0
+        if not np.any(eligible):
+            return 0
+        score = np.where(eligible, self._winner_ema, -np.inf)
+        return int(np.argmax(score))
+
+    def _winner_sources(self, category: int) -> np.ndarray:
+        """Upstream inputs currently driving the anchor readout unit.
+
+        The presynaptic (Kenyon cell) indices of the measured plastic synapses
+        that terminate on the anchor output unit. New recruits are drawn to
+        overlap at most (1 - divergence) with these.
+        """
+        plastic = self.plastic
+        if plastic.weights.size == 0:
+            return np.array([], dtype=np.int64)
+        idx = np.flatnonzero(plastic.post_indices == category)
+        if idx.size == 0:
+            return np.array([], dtype=np.int64)
+        return np.unique(plastic.pre_indices[idx])
+
+    def _sample_sources(
+        self,
+        pool: np.ndarray,
+        winner_sources: np.ndarray,
+        n_syn: int,
+        divergence: float,
+    ) -> np.ndarray:
+        """Pseudo-random source set adjacent to the anchor's inputs.
+
+        Keeps at most ``floor((1 - divergence) * n_syn)`` of the anchor's own
+        inputs and fills the rest from fresh pool draws, so the recruit
+        resembles the most successful unit structurally but stays far enough
+        from it (> divergence) to be its own neuron.
+        """
+        if n_syn <= 0:
+            return np.array([], dtype=np.int64)
+        if winner_sources.size == 0:
+            rng = self._rng
+            return np.sort(rng.choice(pool, size=n_syn, replace=False))
+        max_overlap = int(np.floor((1.0 - divergence) * n_syn))
+        max_overlap = min(max_overlap, int(winner_sources.size))
+        rng = self._rng
+        base = (
+            rng.choice(winner_sources, size=max_overlap, replace=False)
+            if max_overlap > 0
+            else np.array([], dtype=np.int64)
+        )
+        # The complement excludes ALL anchor inputs, not just the kept ones, so
+        # an extra draw can never re-import another anchor input and silently
+        # cut the achieved divergence.
+        winner_members = set(int(s) for s in winner_sources)
+        non = pool[np.isin(pool, list(winner_members), invert=True)]
+        n_new = n_syn - base.size
+        extra = (
+            rng.choice(non, size=min(n_new, non.size), replace=False)
+            if n_new > 0 and non.size > 0
+            else np.array([], dtype=np.int64)
+        )
+        return np.sort(np.unique(np.concatenate([base, extra])))
+
+    def _remarkable_source_set(
+        self,
+        pool: np.ndarray,
+        winner_sources: np.ndarray,
+        n_syn: int,
+        divergence: float,
+    ) -> tuple[np.ndarray | None, float]:
+        """The ``(sources, achieved_divergence)`` pair for one new neuron.
+
+        Enforces the input-signature ledger so no two recruits ever share an
+        identical source set ("no two neurons look the same"). Collisions are
+        retried with ever-higher divergence; returns (None, 0.0) if the pool is
+        too small to produce a unique set.
+        """
+        attempts = int(self.config.get("structural.recruit_uniqueness_retries", 8)) if self.enforce_unique else 1
+        for attempt in range(attempts):
+            div = divergence if attempt == 0 else 1.0
+            sources = self._sample_sources(pool, winner_sources, n_syn, div)
+            signature = frozenset(int(s) for s in sources)
+            if not self.enforce_unique or signature not in self._input_signatures:
+                self._input_signatures.add(signature)
+                achieved = (
+                    0.0
+                    if winner_sources.size == 0
+                    else 1.0 - len(signature.intersection(int(s) for s in winner_sources)) / n_syn
+                )
+                return sources, achieved
+        return None, 0.0
+
     def _recruit(self, trial: int) -> list[StructuralEvent]:
         if self._reserve_stage is None:
             LOGGER.warning("recruitment skipped: no upstream stage for the reserve pool")
@@ -555,11 +750,12 @@ class StructuralPlasticity:
 
         # Population the new neurons are drawn to resemble: the fan-in and the
         # INITIAL synaptic weights of the measured plastic pathway. New neurons
-        # are NOT clones of a template -- each draws its own random sources and
-        # bootstraps its weights from this population, so their weight
-        # mean/spread and fan-in match it by construction. The initial weights
-        # are used rather than the current ones so recruitment does not inherit
-        # a collapsed (all-zero) population and wire up dead neurons.
+        # grow adjacent to the most successful readout unit (anchor): they
+        # inherit its category and a small fraction of its inputs, but draw the
+        # rest of their inputs pseudo-randomly (>= divergence) and bootstraps
+        # their gain at the population average. The initial weights are used
+        # rather than the current ones so recruitment does not inherit a
+        # collapsed (all-zero) population and wire up dead neurons.
         population_weights = np.asarray(
             self.plastic.initial_weights, dtype=np.float64
         )
@@ -577,6 +773,9 @@ class StructuralPlasticity:
         population_mean = float(population_weights.mean())
         population_std = float(population_weights.std())
 
+        anchor_category = self._anchor_category()
+        winner_sources = self._winner_sources(anchor_category)
+
         events: list[StructuralEvent] = []
         for _offset in range(n_new):
             # _recruited advances once per neuron below, so it is the index
@@ -592,14 +791,25 @@ class StructuralPlasticity:
                 return events
 
             # Fan-in: draw a synapse count from the population's per-neuron
-            # distribution, then pick that many DISTINCT presynaptic sources at
-            # random from the upstream pool (without replacement).
+            # distribution, then pick that many DISTINCT presynaptic sources
+            # adjacent to the anchor's own inputs (psuedo-random, >= divergence
+            # different) without replacement.
             n_syn = int(self._rng.choice(post_counts)) if post_counts.size else 1
             n_syn = max(1, min(n_syn, pool.size))
-            sources = self._rng.choice(pool, size=n_syn, replace=False)
-            # Weights: bootstrap from the population, then apply multiplicative
-            # noise, so the new neuron's weight statistics track the population.
-            base = self._rng.choice(population_weights, size=n_syn, replace=True)
+            sources, achieved = self._remarkable_source_set(
+                pool, winner_sources, n_syn, self.divergence
+            )
+            if sources is None or sources.size == 0:
+                LOGGER.warning(
+                    "trial %d: could not find a unique input set for recruit "
+                    "%d; skipping", trial, self._recruited,
+                )
+                continue
+            n_syn = int(sources.size)
+            # Weights: the recruit starts at the population-average gain with
+            # small multiplicative noise, so its initial drive is "average" and
+            # tuning (plasticity) does the rest.
+            base = float(population_mean)
             noise = 1.0 + self.recruit_noise * self._rng.standard_normal(n_syn)
             new_weights = np.clip(base * noise, 0.0, None)
 
@@ -643,8 +853,15 @@ class StructuralPlasticity:
                 [expansion.n_synapses_each,
                  np.full(n_syn, 1, dtype=np.int64)]
             )
+            # `_retire_age` mirrors `expansion.active` one-to-one; both grow by
+            # exactly `n_syn` here (the active array was already appended above),
+            # so append in lockstep rather than resyncing to the grown size.
+            self._retire_age = np.concatenate(
+                [self._retire_age, np.zeros(n_syn, dtype=np.int64)]
+            )
 
-            category = int(reserve_local % self.n_categories)
+            category = anchor_category
+            self.network.reserve_categories[reserve_local] = int(category)
             self._recruited += 1
             events.append(StructuralEvent(
                 trial=trial, kind=RECRUIT,
@@ -652,6 +869,8 @@ class StructuralPlasticity:
                     "source_stage": source_stage,
                     "new_neuron_index": int(reserve_local),
                     "readout_category": category,
+                    "anchor_category": anchor_category,
+                    "divergence": float(achieved),
                     "n_synapses": int(n_syn),
                     "source_indices": [int(s) for s in sources],
                     "noise": self.recruit_noise,
@@ -778,9 +997,11 @@ class StructuralPlasticity:
             },
             "note": (
                 "Exploratory mechanism with no published precedent. Recruited "
-                "reserve neurons are wired with pseudorandom population-matched "
-                "plastic mushroom_body input and counted in the readout, so they "
-                "are full output units. Deletions are reserve-synapse prunes "
-                "budgeted at prune_per_recruit per recruited neuron."
+                "reserve neurons grow adjacent to the most successful readout "
+                "unit: they inherit its category and at most (1 - divergence) "
+                "of its inputs, draw the rest pseudo-randomly at average gain, "
+                "and share no identical input set. Deletions are reserve-"
+                "synapse prunes budgeted at prune_per_recruit per recruited "
+                "neuron, topped up by retirement of the weakest synapses."
             ),
         }

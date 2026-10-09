@@ -231,7 +231,13 @@ def test_total_fraction_cap_is_enforced():
     for step in range(4):
         built.plastic.weights[:] = 0.0
         built.plastic.active[:] = True
-        total += len([e for e in sp.step(trial=(step + 1) * 10) if e.kind == "prune"])
+        # The total-fraction cap governs the measured plastic pathway; reserve
+        # retirements are budgeted separately by prune_per_recruit additions,
+        # so exclude them from this assertion.
+        total += len([
+            e for e in sp.step(trial=(step + 1) * 10)
+            if e.kind == "prune" and not e.detail.get("retired", False)
+        ])
 
     allowed = int(np.floor(0.2 * sp.total_plastic))
     assert total <= allowed, f"pruned {total}, allowed {allowed}"
@@ -339,4 +345,114 @@ def test_on_and_off_differ_only_in_structural_events():
     kinds = {e.kind for e in on_events}
     assert kinds & {"prune", "silence", "recruit"}, (
         f"expected structural events, got {sorted(kinds)}"
+    )
+
+
+def test_recruit_input_sets_are_unique():
+    # Requirement: no two neurons look the same -- distinct input sets only.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "1",
+        "structural.prune_per_recruit": "0",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+
+    for trial in range(1, 7):  # reserve pool holds 6 neurons
+        recruits = [e for e in sp.step(trial=trial) if e.kind == "recruit"]
+        assert len(recruits) <= 1, "per-interval cap must hold"
+    recruited = sp.stats.recruits
+    assert recruited > 1, "must recruit more than one neuron to test uniqueness"
+
+    signatures = {
+        frozenset(e.detail["source_indices"])
+        for e in sp.events if e.kind == "recruit"
+    }
+    assert len(signatures) == recruited, (
+        f"{recruited} recruits but only {len(signatures)} unique input sets"
+    )
+
+
+def test_recruit_starts_at_average_gain():
+    # New neurons bootstrap at the population-average gain (not the anchor's),
+    # then tune from there.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "1",
+        "structural.prune_per_recruit": "0",
+        "structural.recruit_noise": "0",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+    recruit = [e for e in sp.step(trial=10) if e.kind == "recruit"]
+    assert recruit
+    mean = float(np.mean(np.asarray(built.expansion_plastic.weights)))
+    population_mean = recruit[0].detail["population_mean_weight"]
+    assert np.isclose(mean, population_mean), (
+        f"recruit gain {mean} != population average {population_mean}"
+    )
+
+
+def test_recruit_divergence_from_anchor_at_least_0_8():
+    # Growth must be "adjacent to the most successful ones": a recruit keeps at
+    # most (1 - divergence) of the anchor's inputs (default divergence 0.85).
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "1",
+        "structural.prune_per_recruit": "0",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+    # Make category 0 the winner so the anchor's inputs are well defined.
+    for _ in range(50):
+        sp.observe_trial(0, "reward")
+    winner_sources = sp._winner_sources(0)
+    assert winner_sources.size > 0, "test requires the anchor to have inputs"
+
+    for trial in range(1, 5):
+        for e in sp.step(trial=trial):
+            if e.kind != "recruit":
+                continue
+            assert e.detail["readout_category"] == 0, (
+                "recruit must join the most successful unit's category"
+            )
+            assert e.detail["divergence"] >= 0.8, (
+                f"divergence {e.detail['divergence']:.3f} < 0.8 from anchor"
+            )
+            unit = e.detail["new_neuron_index"]
+            # The readout credits this neuron to the anchor's category via the
+            # shared ledger, not round-robin.
+            assert int(built.reserve_categories[unit]) == 0, (
+                "reserve_categories ledger must record the anchor category"
+            )
+
+
+def test_retirement_deletions_track_additions():
+    # With the weight-threshold gate silent, forced retirement must still
+    # deliver prune_per_recruit deletions per recruited neuron, after giving
+    # each recruit one full interval to mature.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "1",
+        "structural.prune_per_recruit": "0.5",
+        "structural.prune_weight_ratio": "0.0001",
+        "structural.prune_consecutive_checks": "2",
+        "structural.recruitment.force_retire": "true",
+        "structural.recruitment.retirement_min_age": "1",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=2)
+
+    for trial in range(1, 9):
+        sp.step(trial=trial)
+
+    recruited = sp.stats.recruits
+    assert recruited >= 6, f"expected the reserve to fill, got {recruited}"
+    target = int(np.floor(0.5 * recruited))
+    assert sp.stats.expansion_pruned_total == target, (
+        f"pruned {sp.stats.expansion_pruned_total} reserve synapses, "
+        f"expected {target} (prune_per_recruit of {recruited} recruits)"
+    )
+    assert sp.stats.retired_total >= target - 1, (
+        "retirement must deliver the deletions, not the weight threshold"
     )

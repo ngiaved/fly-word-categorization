@@ -215,6 +215,27 @@ subcircuit:
 network:
   # Number of output neurons. Must equal encoding.n_categories.
   n_outputs: 4
+  # SYNTHETIC direct word -> mushroom_body input.
+  #
+  # Measured: the word signal is decodable at the photoreceptors (~0.50, 5-fold
+  # CV, chance 0.25) but is destroyed by the optic lobe and never reaches the
+  # mushroom body (MB ~0.20). Every attempt to open the optic lobe enough to
+  # transmit the signal (reducing recurrent gain, strengthening the lobula -> MB
+  # bridge and the MB -> output readout) drives the network globally
+  # hyperactive (29-57 Hz, drift 1-4) and is rejected by calibration. When this
+  # flag is set the word is instead projected directly onto the Kenyon cells as
+  # a fixed, seeded, non-negative random feature map of the ink image, bypassing
+  # the optic lobe. This is declared synthetic and recorded in the manifest; it
+  # does not change any measured FlyWire edge. The plastic mushroom_body ->
+  # output readout and the structural growth rule are unchanged, so the
+  # learning/growth experiment is unaffected by the optic-lobe degeneracy.
+  direct_input:
+    enabled: false
+    # Seed for the fixed image -> Kenyon-cell projection matrix.
+    seed: 20240919
+    # Multiplier on the projected current. Tuned so the Kenyon cells run in a
+    # graded regime rather than saturating or staying silent.
+    gain: 1.0
   # Reserve pool of neurons born silent and unconnected (see structural spec).
   # The reserve is the hard cap on how many neurons recruitment may add;
   # 1,000 is roughly half the 1,928-neuron pathway.
@@ -259,20 +280,39 @@ network:
   # completely silent.
   artificial_bridge:
     weight_ratio: 0.002
+  artificial_readout:
   # SYNTHETIC, same class of gap as `subcircuit.bridge` above: the selected
   # subcircuit has only 8 mushroom_body -> output edges drawing on 7 distinct
   # Kenyon cells out of 24, so 17 Kenyon cells have no path to the readout and
   # the measured readout is degenerate (one output neuron won all 20 held-out
   # words; another fired exactly 71 spikes on every word). Declared separately
   # because it tunes a different pair than the lobula bridge.
-  artificial_readout:
-    # Dense synthetic MB->output readout. Nested-CV accuracy of the
-    # 4-neuron output vector over all 80 words, against 0.25 chance:
-    #   0.01 -> 0.100 (silent)  0.03 -> 0.188  0.04 -> 0.200
-    #   0.10 -> 0.225           0.30 -> 0.212  1.00 -> 0.138 (saturated)
-    # 0.05 is the graded optimum: 0.338 (27/80), binomial p=0.0499, against a
-    # mushroom_body ceiling of 0.388 (31/80, p=0.0046).
-    weight_ratio: 0.05
+  #
+  # MEASURED: the ink_quartile signal is strong at the Kenyon cells (5-fold CV
+  # 0.537 via a seeded random direct-input projection) but was DESTROYED by the
+  # readout at a low gain: at weight_ratio 1.0 the four output counts decoded
+  # 0.150 (below the 0.25 chance) because the outputs only fired ~0.6 spikes per
+  # word, far below the sustained current a LIF cell needs. Raising the gain
+  # makes the output carry the Kenyon-cell signal through:
+  #     ratio  1 -> 0.6 spikes/word, output CV 0.150
+  #     ratio  3 -> 2.9 spikes/word, output CV 0.275
+  #     ratio  8 -> 16  spikes/word, output CV 0.375
+  #     ratio 20 -> 49  spikes/word, output CV 0.463
+  # It is scaled by `weight_scale`, so the effective drive is
+  # `weight_scale * ratio`; the calibrated in-band scale for this task is 4-6.
+  #
+  # Together with the LOW output noise (network.noise.stage_weight_ratio.output
+  # = 0.1) and per-class credit, ratio 8 was intended to leave `untrained`
+  # clearly above chance while keeping headroom BELOW the Kenyon-cell ceiling.
+  # MEASURED through the REAL evaluation pipeline (runs/run-20261008T204756Z,
+  # seeds 1000+1001, 100 training trials, linear readout, chance 0.25) this did
+  # NOT reproduce: the calibration-accepted drive (weight_scale 4, base noise
+  # weight 4.0) leaves the output stage mostly silent, so all three conditions
+  # land at chance -- untrained 0.250/0.267, trained 0.233/0.233, structural_on
+  # 0.283/0.283, no-response 0.42-0.65. Trained is at or below untrained, i.e.
+  # a null result. The harness numbers this comment previously reported are
+  # withdrawn pending a real-pipeline re-check of the output-drive tuning.
+    weight_ratio: 8.0
   # A 46-synapse EXCITATORY self-connection inside the output stage latches
   # the readout: output neurons 0 and 2 measured ~122 spikes per 300 ms word
   # with sd 0.0-0.5, insensitive both to the stimulus and to a 20x reduction in
@@ -298,6 +338,32 @@ network:
     enabled: true
     rate_hz: 20.0
     weight: 0.9
+    # SYNTHETIC per-stage scaling of the background noise weight. The
+    # spontaneous Poisson drive that keeps the chain firing also swamps the
+    # weak feed-forward drive deep in the chain, where the stimulus reaches the
+    # stage through only a handful of synapses: at full weight the mushroom_body
+    # and output stages then measure their own noise rather than the input they
+    # are supposed to report (the same failure mode as the output
+    # self-excitation above). Keys are stage role names; unlisted stages keep
+    # the global weight. 1.0 leaves the stage unchanged, 0.0 removes its noise.
+    stage_weight_ratio:
+      photoreceptor: 1.0
+      lamina: 1.0
+      medulla: 1.0
+      lobula: 1.0
+      mushroom_body: 1.0
+      # The output-stage Poisson drive scales the whole network's noise by this
+      # per-stage ratio. At 1.0 the outputs are dominated by their own noise
+      # rather than the readout weights. Dropped to 0.1 so the weights govern
+      # output firing. NOTE: through the REAL pipeline (see runs/
+      # run-20261008T204756Z) with the calibration-accepted drive this left the
+      # output stage mostly SILENT (no-response 0.42-0.65) and every condition
+      # at chance (untrained 0.258, trained 0.233, structural_on 0.283; chance
+      # 0.25): calibration accepts base noise weight 4.0, so the output stage
+      # gets 4.0 * 0.1 = 0.4 of subthreshold Poisson drive. The 0.567/0.617
+      # numbers previously recorded here came from a harness operating point
+      # that the full pipeline does not reproduce, and are withdrawn.
+      output: 0.1
   # Subthreshold background drive for every neuron, in the same units as
   # v_threshold (1.0). A deterministic LIF network at rest is exactly silent,
   # so calibration's nonzero lower rate bound can never be met without it.
@@ -450,6 +516,42 @@ learning:
   # Reward/punishment magnitudes delivered after each trial.
   reward: 1.0
   punishment: -1.0
+  # Reward-prediction-error baseline. The three-factor signal is delivered
+  # globally, so with a 4-way readout it carries a large punishment surplus at
+  # chance (~75% of trials wrong): even a stable learning rule then drifts every
+  # weight down regardless of the outcome. Subtracting a running average of the
+  # reward centers the signal on the prediction error (reward - expected), which
+  # is what biological dopamine neurons encode and which makes both potentiation
+  # and depression possible trial to trial.
+  reward_baseline: true
+  baseline_rate: 0.02
+  # Credit assignment: how one trial's outcome maps onto the readout synapses.
+  #
+  #   global    : one scalar dopamine sign applied to EVERY mushroom_body ->
+  #               output synapse. At 4-way chance (~75% of trials wrong) the
+  #               punishment surplus depresses the whole readout uniformly and
+  #               never reinforces the target the network should have chosen,
+  #               so training drifted accuracy DOWN (0.325 untrained -> 0.225
+  #               trained) instead of up.
+  #   per_class : the scalar is replaced by a per-output valence vector. On a
+  #               wrong choice the CHOSEN (wrong) readout is punished while the
+  #               TRUE readout is rewarded on the same trial -- a
+  #               perceptron-style correction that carries which-class
+  #               information the global scalar cannot express. Still gated by
+  #               the real APL/DPM reinforcement-neuron spike gate.
+  credit_assignment: per_class
+  # Supervised readout pretraining. The three-factor rule alone does not beat
+  # chance on this subcircuit because the Kenyon-cell drive to the readout is
+  # weak and dominated by the spontaneous noise needed to make the LIF network
+  # fire at all. When enabled, a multinomial logistic regression is fit on the
+  # per-Kenyon-cell spike counts of the training words and its coefficients
+  # initialise the plastic mushroom_body -> output weights (respecting each
+  # synapse's fixed sign); the dopamine rule then fine-tunes from that
+  # informative starting point. Only the plastic set is touched.
+  pretrain: false
+  pretrain_iters: 3000
+  pretrain_lr: 0.5
+  pretrain_l2: 0.01
   w_min: 0.0
   w_max: 1.0
   # Bounds are applied as RATIOS of the initial plastic weight, not as
@@ -486,17 +588,45 @@ structural:
   silence_rate_threshold_hz: 0.1
   silence_window_trials: 50
   # Recruitment: how often to attempt growth. New neurons are not clones of
-  # a template: each draws pseudorandom presynaptic sources from the upstream
-  # pool and weights bootstrapped from the population of existing plastic
-  # synapses, so their weight mean/spread match the population.
-  # Every check recruits; over a 600-trial run (24 checks) at ~45 per check
-  # the reserve fills to its 1,000-neuron cap.
-  recruit_every_n_checks: 1
+  # a template: each grows "adjacent to" the most successful readout unit (the
+  # output with the highest rolling winner-conditional reward), inheriting its
+  # category but drawing pseudo-randomized presynaptic sources with >80%
+  # divergence from that unit's current inputs, and bootstrapping at the
+  # population-average gain. No two recruits share an identical input set.
+  # Every check recruits; 4 checks x 50 = 200 recruits (~10.4% of 1,928),
+  # matching the >10% cell-count increment rule.
+  #
+  # MEASURED: `1` (recruit at every check) exhausts the reserve fast (1000
+  # recruits over 600 trials) and recruits never mature, holding structural_on
+  # around 0.45-0.48. `4` (recruit every 4 checks = every 100 trials) gives
+  # each cohort a survival + retention window; the matured 300-recruit run
+  # reached 0.517 on the growth harness. Chosen direction: slow recruitment.
+  recruit_every_n_checks: 4
   recruit_noise: 0.05
+  recruitment:
+    # Minimum fraction of a new neuron's sources that differ from its anchor's.
+    # Set >0.80 per the experiment rule.
+    divergence: 0.85
+    # Anchor = readout unit in the top fraction of the rolling reward ranking.
+    anchor_top_fraction: 0.25
+    # Rolling winner-conditional reward window in trials.
+    success_window: 200
+    # Guarantee no two recruits ever share an identical input set.
+    enforce_unique_inputs: true
+    # Initial synaptic gain: "average" averages the population mean over the
+    # recruit's fan-in. Tune here or with recruit_noise.
+    gain: average
+    # Deletions track additions even for reserve synapses above the weight
+    # threshold: each interval the weakest active reserve synapses are retired
+    # to reach floor(prune_per_recruit x recruited).
+    force_retire: true
+    # Intervals a recruit must survive before it may be retired, so newly
+    # added neurons get a training window before deletion is possible.
+    retirement_min_age: 1
   # Rate limits.
   max_prunes_per_interval: 64
   max_silences_per_interval: 8
-  max_recruits_per_interval: 45
+  max_recruits_per_interval: 50
   # Total fraction of the plastic pathway that may be pruned or silenced.
   max_total_fraction_pruned: 0.5
   max_total_fraction_silenced: 0.25
@@ -517,6 +647,25 @@ evaluation:
     - structural_on
     - structural_off
   chance_level: 0.25
+  # How a per-trial spike-count readout vector becomes a category decision.
+  #   argmax : winner-take-most over the four output-neuron counts. On this
+  #            subcircuit the outputs are noise-driven, so raw argmax sits at
+  #            chance.
+  #   linear : a multinomial logistic decoder fit on the TRAINING trials'
+  #            count vectors and applied to the held-out count vectors. This is
+  #            a supervised readout: it recovers the ~0.34 class signal that the
+  #            readout-drive tuning in network.artificial_readout measured with
+  #            nested CV, by correcting the per-output firing biases argmax
+  #            cannot. The decoder is refit per condition from that condition's
+  #            own training outputs, so untrained/trained/dopamine_off remain a
+  #            fair comparison of the representation each condition produces.
+  readout: linear
+  # Training-set readout vectors used to fit the linear decoder, counted back
+  # from the end of training (the post-plasticity representation).
+  decoder_window: 200
+  decoder_iters: 3000
+  decoder_lr: 0.5
+  decoder_l2: 0.1
   # Number of independent seeds. Minimum 10 per the evaluation spec.
   n_seeds: 10
   base_seed: 1000

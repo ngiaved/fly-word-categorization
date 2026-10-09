@@ -52,8 +52,22 @@ rather than cloning a single template neuron.
 - WHEN a stimulus is presented
 - THEN its incoming mushroom_body synapses are part of a dopamine-shaped
   plastic set
-- AND its spikes are counted toward its assigned readout category
-- AND winning the readout can change the network's prediction
+- AND its spikes are counted toward its assigned readout category (so they can
+  shift the argmax readout, i.e. winning the readout can change the prediction)
+- AND its per-neuron spike count is returned to the supervised decoder as an
+  additional feature dimension (not folded into a category total), so a noisy
+  recruit can be down-weighted by the decoder instead of degrading the
+  4-category feature vector
+
+#### Scenario: Decoder feature space stays fixed
+- GIVEN structural growth that changes the number of recruited readout units
+  during a training run
+- WHEN the evaluation fits its supervised decoder
+- THEN the decoder is fit on a deterministic post-training pass over the
+  training words (all vectors share the final feature space) so the fit never
+  sees inhomogeneous vectors
+- AND conditions without growth produce identical decoder numbers to the old
+  training-tail fit
 
 #### Scenario: Reserve exhausted
 - GIVEN no reserve neurons remain

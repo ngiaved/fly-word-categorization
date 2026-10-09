@@ -51,6 +51,31 @@ the held-out set.
 - WHEN the report is generated
 - THEN the confusion matrix and no-response rate are included
 
+### Requirement: Supervised linear readout (decoder metric)
+The system SHALL report accuracy through a multinomial logistic (linear)
+decoder fit on the condition's own training count vectors and applied to the
+held-out count vectors. The per-condition decoder corrects the per-output firing
+biases that raw argmax cannot, and it is refit from each condition's own
+outputs so untrained/trained/dopamine_off/structural_on remain a fair comparison
+of the representation each condition produces. Raw argmax remains available and
+is still what drives dopamine credit during training.
+
+#### Scenario: Decoder on held-out counts
+- GIVEN training trial count vectors and labels for a condition
+- WHEN the report metric is computed
+- THEN a logistic decoder is fit on the training vectors (`evaluation.readout: linear`)
+- AND predictions on held-out vectors come from that decoder (not raw argmax)
+- AND the decoder is refit independently for every condition
+
+#### Scenario: Fixed decoder feature space under growth
+- GIVEN a trained condition whose readout size changed mid-training (structural
+  growth)
+- WHEN the decoder fit vectors are collected
+- THEN they are collected as a deterministic post-training pass over the
+  training words with `learn=False`, all in one fixed feature space
+- AND for conditions without growth these vectors are identical to the tail of
+  the training loop, so reported numbers are unchanged
+
 ### Requirement: Negative results are reportable
 The system SHALL report results the same way whether or not learning exceeds chance.
 

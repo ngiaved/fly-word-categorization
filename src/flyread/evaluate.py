@@ -26,7 +26,10 @@ LOGGER = logging.getLogger(__name__)
 # Condition -> config overrides and dataset handling. Applied by run_condition.
 CONDITIONS: dict[str, dict[str, Any]] = {
     "untrained": {"trained": False},
-    "trained": {"trained": True},
+    # "trained" is the no-growth learning control: structural.disabled so it
+    # differs from structural_on only by the growth mechanism (previously both
+    # fell back to the config's structural.enabled, making them identical).
+    "trained": {"trained": True, "structural": False},
     "shuffled_labels": {"trained": True, "shuffle_labels": True},
     "dopamine_off": {"trained": True, "dopamine": False},
     "shuffled_pixels": {"trained": True, "shuffle_pixels": True},
@@ -243,12 +246,14 @@ def test_against_chance(
             f"need at least 2 seeds for a significance test, got {values.size}"
         )
 
-    # Every seed landed exactly on chance, so the sample has zero variance and
-    # the t statistic is 0/0. scipy returns nan, which would serialize into the
-    # report as a bare "nan". There is no evidence against chance, so p = 1.
-    # Zero variance with a mean that differs from chance is left to scipy, which
-    # handles it as an infinite t statistic and a p value of 0.
-    if float(values.std(ddof=1)) == 0.0 and float(values.mean()) == chance:
+    # Every seed landed on the same value, so the sample has zero variance and
+    # the t statistic is degenerate (0/0 when at chance, or an infinite ratio
+    # otherwise, which scipy turns into p = 0). Neither is evidence: with zero
+    # variance there is no distribution to infer from, so no significance can
+    # be claimed regardless of the mean. p is reported as 1.0 and the report
+    # explains the degenerate case instead of emitting a bare nan or a bogus
+    # "significant".
+    if float(values.std(ddof=1)) == 0.0:
         zero_variance = SignificanceResult(
             chance=chance,
             n_seeds=int(values.size),
@@ -265,7 +270,8 @@ def test_against_chance(
         )
         zero_variance.note = (
             "all seeds produced identical accuracy, so the test has zero "
-            "variance; p is reported as 1.0 and no significance is claimed"
+            "variance; p is reported as 1.0 and no significance is claimed, "
+            "even when the identical value differs from chance"
         )
         return zero_variance
 
@@ -336,6 +342,7 @@ class RunResult:
             "plasticity": self.plasticity,
             "structural": self.structural,
             "n_trials": len(self.records),
+            "extra": self.extra,
         }
         if include_records:
             payload["records"] = [
@@ -419,16 +426,33 @@ def run_condition(
 
     n_trials = int(run_config.get("evaluation.n_train_trials"))
     window = int(run_config.get("evaluation.curve_window_trials"))
+    dec_window = int(run_config.get("evaluation.decoder_window", 200))
     order = make_rng(seed, stream="trial-order").permutation(len(train_items))
 
+    pretrain_info: dict[str, Any] = {}
+    if settings.get("trained") and bool(run_config.get("learning.pretrain", False)):
+        from .learning import pretrain_readout
+
+        pretrain_info = pretrain_readout(
+            runner, train_items, labels_for_training, run_config
+        )
+        LOGGER.info(
+            "[%s seed=%d] pretrained readout: %s", condition, seed, pretrain_info
+        )
+
+    train_vectors: list[Any] = []
+    train_true_labels: list[int] = []
     if settings.get("trained"):
         for step in range(n_trials):
             position = int(order[step % len(order)])
             record = runner.run_trial(
                 train_items[position].word, labels_for_training[position], step
             )
+            train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
+            train_true_labels.append(train_items[position].label)
             # runner.run_trial snapshots per-stage rates during the stimulus
             # window; the live monitors are cleared for the rest period.
+            structural.observe_trial(record.predicted, record.reward_type)
             structural.observe(runner.last_stimulus_rates)
             structural.maybe_step(step + 1)
             if (step + 1) % 200 == 0:
@@ -438,13 +462,44 @@ def run_condition(
                     runner.accuracy(max(0, step + 1 - window)),
                 )
         train_accuracy = runner.accuracy()
+        # Decoder-fit pass on the FINAL representation. Run after the training
+        # loop so the fit features live in one fixed feature space even when
+        # structural growth changed the readout size mid-training (otherwise the
+        # last `decoder_window` training vectors have inhomogeneous lengths and
+        # the decoder fit crashes). run_trial(learn=False) is deterministic for
+        # a fixed word and weight state, so for conditions without growth these
+        # vectors are identical to the tail of the training loop and the numbers
+        # are unchanged.
+        train_vectors = []
+        train_true_labels = []
+        for exp in range(dec_window):
+            position = int(order[exp % len(order)])
+            rec = runner.run_trial(
+                train_items[position].word,
+                labels_for_training[position],
+                200_000 + exp,
+                learn=False,
+            )
+            train_vectors.append(np.asarray(rec.spike_counts, dtype=np.float64))
+            train_true_labels.append(train_items[position].label)
     else:
         train_accuracy = float("nan")
+        # The untrained control has no training loop, but the supervised readout
+        # still needs training-set readout vectors to fit its decoder; collect
+        # them without any weight update so the comparison is decoder-for-
+        # decoder across conditions.
+        for index, item in enumerate(train_items):
+            record = runner.run_trial(
+                item.word, item.label, 100_000 + index, learn=False
+            )
+            train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
+            train_true_labels.append(item.label)
+            structural.observe_trial(record.predicted, record.reward_type)
 
     # Held-out evaluation: words never presented during training.
     repeats = int(run_config.get("evaluation.eval_repeats"))
     true_labels: list[int] = []
-    predictions: list[int] = []
+    test_vectors: list[np.ndarray] = []
     eval_records = []
     for item in test_items:
         for _ in range(repeats):
@@ -452,8 +507,27 @@ def run_condition(
                 item.word, item.label, 100_000 + len(eval_records), learn=False
             )
             true_labels.append(item.label)
-            predictions.append(probe.predicted)
+            test_vectors.append(np.asarray(probe.spike_counts, dtype=np.float64))
             eval_records.append(probe)
+
+    readout_mode = str(run_config.get("evaluation.readout", "argmax"))
+    if readout_mode == "linear" and train_vectors:
+        from .learning import decoder_predict, fit_readout_decoder
+
+        dec_window = int(run_config.get("evaluation.decoder_window", 200))
+        fit_features = np.asarray(train_vectors[-dec_window:], dtype=np.float64)
+        fit_labels = np.asarray(train_true_labels[-dec_window:], dtype=np.int64)
+        if len(np.unique(fit_labels)) >= 2:
+            decoder = fit_readout_decoder(
+                fit_features, fit_labels, len(dataset.categories), run_config
+            )
+            predictions = decoder_predict(
+                np.asarray(test_vectors, dtype=np.float64), decoder
+            ).tolist()
+        else:
+            predictions = [record.predicted for record in eval_records]
+    else:
+        predictions = [record.predicted for record in eval_records]
 
     held_out_accuracy = (
         sum(1 for t, p in zip(true_labels, predictions) if p == t) / len(true_labels)
@@ -479,6 +553,7 @@ def run_condition(
             "n_stimulus_presentations": len(runner.history),
             "weight_scale": weight_scale,
             "structural_event_count": len(structural.events),
+            "pretrain": pretrain_info,
         },
     )
 

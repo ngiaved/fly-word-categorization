@@ -71,6 +71,42 @@ Use a compiled code generation target if available (Cython) with a numpy
 fallback; the choice is recorded in the run manifest because it affects
 speed and (slightly) numerical results.
 
+### D9: Per-output credit beats one global scalar (measured, post-hoc)
+The original D4 scalar rule assigned ONE sign to every plastic synapse per
+trial. At 4-way chance (~75% wrong) punishment therefore depressed the whole
+readout uniformly, including the winner's own weights, and measured trained
+accuracy drifted below the untrained control. Per-class credit corrects the
+true output while punishing the chosen one on the same trial. Combined with
+two measured fixes, this turned the readout from a null into a positive signal
+**at inspect/harness operating points**:
+- `network.artificial_readout.weight_ratio = 8` (was 0.05 then 20): at low
+  gain the outputs fire ~0.6 spikes/word (decoded 0.15, below chance); at 20
+  untrained already sits at the Kenyon-cell ceiling (~0.54) leaving training no
+  headroom. 8 transmits the signal while leaving headroom for learning.
+- `network.noise.stage_weight_ratio.output = 0.1` (was 1.0): at full weight the
+  outputs measure their own Poisson noise, so re-tuned readout weights are
+  drowned and trained <= untrained in every trial; at 0.1 trained >= untrained
+  in the completed seeds.
+- Recruited units are returned to the linear decoder as extra feature
+  dimensions (they still fold into their category for the argmax readout),
+  so growth adds capacity instead of injecting noise into 4 buckets.
+
+CORRECTION (real pipeline, runs/run-20261008T204756Z, seeds 1000+1001, 100
+training trials, linear readout; chance 0.25): through the FULL evaluation path
+these settings do NOT produce the harness numbers above. The calibration-accepted
+drive (weight_scale 4, base noise weight 4.0) under-drives the output stage
+(`0.1` output ratio => 0.4 output noise) so the four outputs fire on only
+~35-58 % of presentations; untrained 0.258, trained 0.233, structural_on 0.283
+-- a null result, trained at or below untrained. The D9 harness numbers are
+withdrawn. A three-axis probe sweep (untrained, seed 1000) then showed the
+silence is not the blocker: raising the readout ratio to 50 restores 100 %
+firing yet accuracy stays at chance (0.18-0.33), as do stimulus contrast up to
+800 Hz max_hz and bridge densities to 48 synapses/KC. The
+word-class signal is lost in the mushroom body under the calibrated regime, so
+no readout-drive choice recovers it. Per-class credit and the
+recruits-as-decoder-features decisions remain valid design choices; whether they
+give a measurable payoff is now unconfirmed (see docs/final-report.md).
+
 ## Module layout
 ```
 src/flyread/

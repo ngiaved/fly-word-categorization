@@ -580,11 +580,13 @@ def build_network(
     if config.get("network.noise.enabled"):
         noise_rate = float(config.get("network.noise.rate_hz")) / b2.second
         noise_weight = float(config.get("network.noise.weight"))
+        stage_ratios = dict(config.get("network.noise.stage_weight_ratio", {}))
         for stage in stages.values():
             source = b2.PoissonGroup(stage.n, rates=noise_rate, name=f"noise_{stage.name}")
+            stage_ratio = float(stage_ratios.get(stage.name, 1.0))
             syn_noise = b2.Synapses(
                 source, stage.group, on_pre="I_syn += w_noise", method="euler",
-                namespace={"w_noise": noise_weight},
+                namespace={"w_noise": noise_weight * stage_ratio},
             )
             # One noise source per neuron, connected one-to-one. A dense
             # PoissonGroup -> NeuronGroup connection would be O(n^2) synapses.
@@ -647,13 +649,36 @@ class CalibrationResult:
     continuous_fraction: float
     rate_drift_hz: float
     accepted: bool
+    # Drive parameters that were searched jointly with ``weight_scale``. They
+    # must travel with the accepted scale: the calibrated end point lives in a
+    # narrow (scale, background_dc, noise_weight) region, so rebuilding the
+    # trained network at the accepted scale but the CONFIGURED noise silently
+    # reverts to the silent/saturated corner and the readout never responds.
+    background_dc_na: float = 0.0
+    noise_weight: float = 0.0
     attempts: list[dict[str, float]] = field(default_factory=list)
     acceptable_band_hz: tuple[float, float] = (0.5, 15.0)
     max_continuous_fraction: float = 0.02
 
+    def apply_drive(self, config):
+        """Return ``config`` with the accepted drive parameters applied.
+
+        The calibrated operating point is only meaningful together with the
+        drive that was searched for it. Rebuilding the trained network at the
+        accepted ``weight_scale`` but the CONFIGURED ``background_dc_na`` and
+        ``network.noise.weight`` reverts to the silent corner where the readout
+        never fires; every training/evaluation build must apply this first.
+        """
+        return config.with_overrides({
+            "network.background_dc_na": float(self.background_dc_na),
+            "network.noise.weight": float(self.noise_weight),
+        })
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "weight_scale": self.weight_scale,
+            "background_dc_na": self.background_dc_na,
+            "noise_weight": self.noise_weight,
             "mean_rate_hz": self.mean_rate_hz,
             "max_rate_hz": self.max_rate_hz,
             "continuous_fraction": self.continuous_fraction,
@@ -1014,6 +1039,8 @@ def calibrate(
                     continuous_fraction=stats["continuous_fraction"],
                     rate_drift_hz=stats["rate_drift_hz"],
                     accepted=True,
+                    background_dc_na=used_dc,
+                    noise_weight=used_noise,
                     attempts=attempts,
                     acceptable_band_hz=band,
                     max_continuous_fraction=max_continuous,

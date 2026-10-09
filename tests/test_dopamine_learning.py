@@ -137,6 +137,29 @@ def test_readout_seeded_tie_breaking_and_no_response():
     assert silent.predicted == learning.NO_RESPONSE
 
 
+def test_supervised_decoder_recovers_separable_classes():
+    # Requirement: supervised linear readout (evaluation.readout=linear)
+    rng = np.random.default_rng(0)
+    centers = rng.normal(size=(4, 6)) * 3.0
+    features = np.vstack(
+        [centers[c] + rng.normal(scale=0.3, size=(15, 6)) for c in range(4)]
+    )
+    labels = np.repeat(np.arange(4), 15)
+
+    cfg = _config()
+    decoder = learning.fit_readout_decoder(features, labels, 4, cfg)
+    predicted = learning.decoder_predict(features, decoder)
+
+    assert (predicted == labels).mean() > 0.9
+
+
+def test_decoder_predict_requires_fitted_decoder():
+    import pytest
+
+    with pytest.raises(learning.LearningError):
+        learning.decoder_predict(np.zeros((2, 4)), None)
+
+
 def test_dopamine_signal_selection():
     cfg = _config()
     assert learning.dopamine_for(1, 1, cfg) == (1.0, "reward")

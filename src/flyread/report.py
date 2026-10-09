@@ -98,6 +98,118 @@ def headline(report: EvaluationReport, main_condition: str = "trained") -> str:
     return text
 
 
+def structural_growth_section(
+    seed_results: Sequence[SeedResult], manifest_summary: dict[str, Any]
+) -> str:
+    """Markdown section reporting final neuron/synapse counts after growth.
+
+    Aggregates every condition that actually recruited (i.e. performed
+    structural growth) across seeds. Returns an empty string when no run grew,
+    so reports from non-growth configs are unchanged. ``final neurons`` and
+    ``final synapses`` add the base subcircuit counts in ``manifest_summary``
+    to the activated reserve neurons and the net reserve synapses.
+    """
+    base_neurons = manifest_summary.get("n_neurons")
+    base_edges = manifest_summary.get("n_edges")
+    rows: list[dict[str, Any]] = []
+    notes: set[str] = set()
+    for seed_result in seed_results:
+        for condition, result in seed_result.results.items():
+            summary = result.structural
+            if not summary:
+                continue
+            stats = summary.get("stats", {}) or {}
+            recruited = int(stats.get("recruits", 0))
+            if recruited <= 0:
+                continue
+            reserve = summary.get("reserve", {}) or {}
+            events = summary.get("events_by_kind", {}) or {}
+            created = int(reserve.get("expansion_synapses", 0))
+            removed = int(
+                stats.get("expansion_pruned_total", stats.get("pruned_total", 0))
+            )
+            remaining = created - removed
+            rows.append(
+                {
+                    "seed": seed_result.seed,
+                    "condition": condition,
+                    "pool_size": reserve.get("size"),
+                    "available": reserve.get("available"),
+                    "recruited": recruited,
+                    "created": created,
+                    "removed": removed,
+                    "retired": int(stats.get("retired_total", 0)),
+                    "remaining": remaining,
+                    "final_neurons": (
+                        base_neurons + recruited
+                        if isinstance(base_neurons, int)
+                        else None
+                    ),
+                    "final_edges": (
+                        base_edges + remaining
+                        if isinstance(base_edges, int)
+                        else None
+                    ),
+                    "recruit_events": int(events.get("recruit", recruited)),
+                    "prune_events": int(events.get("prune", removed)),
+                    "silence_events": int(events.get("silence", 0)),
+                }
+            )
+            note = summary.get("note")
+            if note:
+                notes.add(str(note))
+
+    if not rows:
+        return ""
+
+    lines = [
+        "## Structural growth",
+        "",
+        "Reserve neurons are born silent and unconnected. Growth activates them "
+        "and draws new synapses from the real upstream population; deletions "
+        "retire the weakest mature reserve synapses so they track a fixed "
+        "fraction of the additions (`structural.prune_per_recruit`). "
+        "`final neurons` and `final synapses` are the base subcircuit counts "
+        "plus the activated reserve neurons and the net new synapses.",
+        "",
+        "| seed | condition | reserve pool | activated | created syn | "
+        "retired syn | net syn | final neurons | final synapses |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for row in rows:
+        label = CONDITION_LABELS.get(row["condition"], row["condition"])
+        pool = row["pool_size"]
+        available = row["available"]
+        pool_text = (
+            f"{pool} ({available} available)"
+            if isinstance(pool, int) and isinstance(available, int)
+            else "n/a"
+        )
+        lines.append(
+            f"| {row['seed']} | {label} | {pool_text} | {row['recruited']} | "
+            f"{row['created']} | {row['retired']} | {row['remaining']} | "
+            f"{_fmt_int(row['final_neurons'])} | {_fmt_int(row['final_edges'])} |"
+        )
+    lines.append("")
+    lines.append("Structural events per seed (recruit / prune / silence):")
+    lines.append("")
+    for row in rows:
+        label = CONDITION_LABELS.get(row["condition"], row["condition"])
+        lines.append(
+            f"- seed {row['seed']} ({label}): {row['recruit_events']} / "
+            f"{row['prune_events']} / {row['silence_events']}"
+        )
+    lines.append("")
+    for note in sorted(notes):
+        lines.append(f"> Recruitment rule: {note}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _fmt_int(value: int | None) -> str:
+    return str(value) if value is not None else "n/a"
+
+
 def build_markdown(
     report: EvaluationReport,
     seed_results: Sequence[SeedResult],
@@ -160,6 +272,11 @@ def build_markdown(
         f"- wall-clock for the sweep: {_fmt(meta.get('total_seconds'), 1)} s",
         f"- codegen target: {meta.get('codegen_target', '?')}",
         "",
+    ]
+    growth = structural_growth_section(seed_results, manifest_summary)
+    if growth:
+        lines += [growth, ""]
+    lines += [
         "## Per-seed held-out accuracy",
         "",
     ]
