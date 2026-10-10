@@ -1,10 +1,12 @@
 """Command line entry points.
 
 Subcommands: ``fetch-data``, ``inspect``, ``calibrate``, ``benchmark``,
-``train``, ``evaluate``, ``run``, ``selftest``.
+``train``, ``evaluate``, ``sweep``, ``merge``, ``run``, ``selftest``.
 
 Every subcommand writes a run manifest. ``run`` is the documented single
-command that reproduces the report from a clean checkout.
+command that reproduces the report from a clean checkout. ``sweep`` fans the
+seeds out across processes and merges them; ``merge`` combines shards after
+the fact.
 """
 
 from __future__ import annotations
@@ -178,6 +180,12 @@ def _run_dir(config: Config, manifest: RunManifest) -> Path:
     return base
 
 
+def _run_dir_for(config: Config, run_id: str) -> Path:
+    base = Path(config.get("run.output_dir")) / str(run_id)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 # --------------------------------------------------------------------------
 # Subcommands
 # --------------------------------------------------------------------------
@@ -306,7 +314,15 @@ def cmd_evaluate(args, config: Config) -> int:
         write_markdown,
     )
 
-    manifest, dataset, subcircuit, seed = _prepare(config, args)
+    run_id = getattr(args, "run_id", None) or config.get("run.run_id") or None
+    if run_id:
+        resume_dir = Path(config.get("run.output_dir")) / str(run_id)
+        if (resume_dir / "results.json").exists():
+            LOGGER.info("run %s already has results.json; skipping (resume)", run_id)
+            print(f"resumed: run {run_id} already complete; nothing to do")
+            return 0
+
+    manifest, dataset, subcircuit, seed = _prepare(config, args, run_id=run_id)
     run_dir = _run_dir(config, manifest)
 
     _network, calibration = calibrate(subcircuit, config, manifest=manifest)
@@ -479,9 +495,267 @@ def cmd_selftest(args, config: Config) -> int:
 
 
 # --------------------------------------------------------------------------
-# Argument parsing
+# Merge and parallel sweep
 # --------------------------------------------------------------------------
 
+def _load_dataset(config: Config):
+    """Load the labelled word dataset exactly as evaluation does."""
+    from .encoding import apply_label_mode, load_dataset
+
+    return apply_label_mode(
+        load_dataset(config.get("data.words_csv"), config.get("encoding.categories")),
+        config,
+        str(config.get("encoding.label_mode")),
+    )
+
+
+def _load_seed_results(payload: dict[str, Any], n_categories: int):
+    """Rebuild SeedResult objects from a run's results.json payload.
+
+    Only the fields the report/aggregate code reads are reconstructed; the
+    per-trial records are intentionally dropped (they are not needed for the
+    statistics, confusion matrix, or learning curves).
+    """
+    import numpy as np
+
+    from .evaluate import ConfusionMatrix, RunResult, SeedResult
+
+    seed_results = []
+    for seed_str, runs in payload.get("runs", {}).items():
+        seed = int(seed_str)
+        results = {}
+        for condition, record in runs.items():
+            results[condition] = RunResult(
+                condition=record["condition"],
+                seed=seed,
+                trained=bool(record["trained"]),
+                train_accuracy=float(record["train_accuracy"]),
+                test_accuracy=float(record["test_accuracy"]),
+                test_no_response_rate=float(record["test_no_response_rate"]),
+                confusion=ConfusionMatrix(
+                    labels=list(range(n_categories)),
+                    counts=np.asarray(record["confusion_matrix"], dtype=np.int64),
+                ),
+                learning_curve=record.get("learning_curve", []),
+                plasticity=record.get("plasticity", {}),
+                structural=record.get("structural"),
+                extra=record.get("extra", {}),
+            )
+        weight_scale = (payload.get("metadata") or {}).get("weight_scale")
+        seconds = float(payload.get("seed_seconds", {}).get(seed_str, 0.0) or 0.0)
+        seed_results.append(
+            SeedResult(seed=seed, results=results, weight_scale=weight_scale,
+                       seconds=seconds)
+        )
+    seed_results.sort(key=lambda sr: sr.seed)
+    return seed_results
+
+
+def merge_runs(config: Config, run_ids: Sequence[str], out_run_id: str) -> int:
+    """Aggregate already-completed runs/<run_id> outputs into one report."""
+    from .evaluate import aggregate, confusion_matrix_total
+    from .report import (
+        build_markdown,
+        plot_confusion,
+        plot_learning_curves,
+        write_json,
+        write_markdown,
+    )
+
+    dataset = _load_dataset(config)
+    n_categories = len(dataset.categories)
+    run_root = Path(config.get("run.output_dir"))
+
+    seed_results: list[Any] = []
+    seconds_total = 0.0
+    codegen_targets: set[str] = set()
+    manifest_summary: dict[str, Any] = {}
+    for run_id in run_ids:
+        run_dir = run_root / run_id
+        results_path = run_dir / "results.json"
+        if not results_path.exists():
+            LOGGER.error("missing %s; cannot merge run %s", results_path, run_id)
+            return 2
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+        seed_results.extend(_load_seed_results(payload, n_categories))
+        seconds_total += float(
+            (payload.get("metadata") or {}).get("total_seconds", 0.0) or 0.0
+        )
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            target = (manifest_data.get("environment") or {}).get("codegen_target")
+            if target:
+                codegen_targets.add(str(target))
+            if not manifest_summary:
+                manifest_summary = manifest_data.get("subcircuit", {}) or {}
+
+    seed_results.sort(key=lambda sr: sr.seed)
+    if not seed_results:
+        LOGGER.error("no seed results to merge")
+        return 2
+
+    seeds = [sr.seed for sr in seed_results]
+    expected = int(config.get("evaluation.n_seeds"))
+    if len(seed_results) < expected:
+        LOGGER.warning(
+            "merging %d seeds but evaluation.n_seeds=%s; the report will note "
+            "reduced power", len(seed_results), expected,
+        )
+    weight_scale = seed_results[0].weight_scale
+    metadata = {
+        "weight_scale": weight_scale,
+        "n_train_trials": int(config.get("evaluation.n_train_trials")),
+        "codegen_target": sorted(codegen_targets)[0] if codegen_targets else "unknown",
+        "total_seconds": seconds_total or sum(sr.seconds for sr in seed_results),
+        "base_seed": seeds[0],
+        "seeds": seeds,
+        "merged_run_ids": list(run_ids),
+    }
+
+    report = aggregate(seed_results, dataset, config, metadata=metadata)
+    confusion = confusion_matrix_total(seed_results, "trained", n_categories)
+    out_dir = _run_dir_for(config, out_run_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    write_json(report, seed_results, out_dir / "results.json")
+    plot_learning_curves(
+        seed_results, list(config.get("evaluation.conditions")),
+        out_dir / "learning_curves.png",
+    )
+    plot_confusion(confusion, dataset.categories, out_dir / "confusion_matrix.png")
+    write_markdown(
+        build_markdown(
+            report, seed_results, dataset.categories, manifest_summary,
+            confusion=confusion,
+        ),
+        out_dir / "report.md",
+    )
+
+    manifest = RunManifest(
+        run_id=out_run_id,
+        seed=seeds[0],
+        config=config.to_dict(),
+        seed_record={"merged": True, "source_runs": list(run_ids), "seeds": seeds},
+    )
+    manifest.subcircuit = manifest_summary
+    manifest.calibration = {"weight_scale": weight_scale}
+    manifest.metrics = {
+        "merged": True,
+        "conditions": report.conditions,
+        "per_seed": report.per_seed,
+        "data_leakage_warning": report.leakage_warning,
+        "confusion_matrix_total": confusion.as_list(),
+        "total_seconds": metadata["total_seconds"],
+    }
+    manifest.write(out_dir)
+    print(f"\nwrote merged run outputs to {out_dir} ({len(seed_results)} seeds)")
+    return 0
+
+
+def cmd_merge(args, config: Config) -> int:
+    """Combine shard run outputs into a single multi-seed report."""
+    out_run_id = args.out or args.run_id or new_run_id(prefix="merged")
+    return merge_runs(config, list(args.dirs), str(out_run_id))
+
+
+def cmd_sweep(args, config: Config) -> int:
+    """Run one process per seed (parallel), then merge into one report.
+
+    Each seed is an ordinary ``evaluate`` run with its own run id, so a crash
+    or shutdown loses at most one seed and re-invoking the command resumes the
+    missing ones (completed shards are skipped).
+    """
+    import os
+    import subprocess
+
+    n_seeds = int(getattr(args, "n_seeds", None) or config.get("evaluation.n_seeds"))
+    workers = int(
+        getattr(args, "workers", None)
+        or config.get("evaluation.workers")
+        or max(1, (os.cpu_count() or 2) - 2)
+    )
+    workers = max(1, min(workers, n_seeds))
+    base_seed = int(config.get("evaluation.base_seed"))
+    prefix = args.run_id or "sweep"
+    run_root = Path(config.get("run.output_dir"))
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    seed_ids = [
+        (seed, f"{prefix}-seed-{seed}")
+        for seed in range(base_seed, base_seed + n_seeds)
+    ]
+    pending = [
+        (seed, shard_id) for seed, shard_id in seed_ids
+        if not (run_root / shard_id / "results.json").exists()
+    ]
+    if pending:
+        LOGGER.info(
+            "sweep %s: %d seeds pending, %d already complete, %d workers",
+            prefix, len(pending), len(seed_ids) - len(pending), workers,
+        )
+    else:
+        LOGGER.info("sweep %s: every seed already has results; merging", prefix)
+
+    base_cmd = [sys.executable, "-m", "flyread"]
+    if args.config:
+        base_cmd += ["--config", args.config]
+    for override in getattr(args, "overrides", []) or []:
+        base_cmd += ["--set", override]
+
+    queue = list(pending)
+    running: dict[str, tuple[Any, int]] = {}
+    failures: list[tuple[int, str, int]] = []
+    try:
+        while queue or running:
+            while queue and len(running) < workers:
+                seed, shard_id = queue.pop(0)
+                cmd = base_cmd + [
+                    "--set", "evaluation.n_seeds=1",
+                    "--set", f"evaluation.base_seed={seed}",
+                    "--run-id", shard_id,
+                    "evaluate",
+                ]
+                log_path = run_root / f"{shard_id}.log"
+                with log_path.open("ab") as handle:
+                    process = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
+                LOGGER.info("started seed %d -> %s (pid %d)", seed, shard_id, process.pid)
+                running[shard_id] = (process, seed)
+            finished = [k for k, (p, _) in running.items() if p.poll() is not None]
+            if not finished:
+                time.sleep(5)
+                continue
+            for shard_id in finished:
+                process, seed = running.pop(shard_id)
+                if process.returncode != 0:
+                    failures.append((seed, shard_id, process.returncode))
+                    LOGGER.error(
+                        "shard %s (seed %d) failed rc=%d", shard_id, seed,
+                        process.returncode,
+                    )
+                else:
+                    LOGGER.info("seed %d finished (%s)", seed, shard_id)
+    except KeyboardInterrupt:
+        for process, _ in running.values():
+            process.terminate()
+        return 130
+
+    if failures:
+        LOGGER.error(
+            "sweep incomplete; failed shards: %s. Re-run the same command to "
+            "resume the missing seeds.",
+            ", ".join(shard_id for _, shard_id, _ in failures),
+        )
+        return 1
+
+    return merge_runs(
+        config, [shard_id for _, shard_id in seed_ids], f"{prefix}-merged"
+    )
+
+
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="flyread",
@@ -493,6 +767,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE", help="override a config value, e.g. evaluation.n_seeds=10",
     )
     parser.add_argument("--seed", type=int, help="override the run seed")
+    parser.add_argument(
+        "--run-id",
+        help=(
+            "write into runs/<id> instead of a fresh timestamped id; enables "
+            "resume (completed runs are skipped)"
+        ),
+    )
     parser.add_argument(
         "--log-level", default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -512,6 +793,24 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("calibrate", help="no-stimulus weight-scale calibration")
     subparsers.add_parser("benchmark", help="CPU feasibility gate")
     subparsers.add_parser("evaluate", help="all conditions x seeds, plus the report")
+
+    merge = subparsers.add_parser(
+        "merge", help="combine completed runs into one multi-seed report"
+    )
+    merge.add_argument(
+        "dirs", nargs="+", help="run ids under run.output_dir to merge"
+    )
+    merge.add_argument("--out", help="run id for the merged output")
+
+    sweep = subparsers.add_parser(
+        "sweep", help="run seeds in parallel, then merge (resumable)"
+    )
+    sweep.add_argument(
+        "--n-seeds", type=int, help="override evaluation.n_seeds for the sweep"
+    )
+    sweep.add_argument(
+        "--workers", type=int, help="parallel worker processes (default: cpu-2)"
+    )
 
     train = subparsers.add_parser("train", help="train a single seed")
     train.add_argument("--condition", default="trained", help="condition name")
@@ -545,6 +844,8 @@ COMMANDS = {
     "benchmark": cmd_benchmark,
     "train": cmd_train,
     "evaluate": cmd_evaluate,
+    "merge": cmd_merge,
+    "sweep": cmd_sweep,
     "run": cmd_run,
     "selftest": cmd_selftest,
 }
