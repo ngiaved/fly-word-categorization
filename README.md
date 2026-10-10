@@ -43,12 +43,12 @@ readout**. Two tasks have been run through the full pipeline:
 1. **`grid-v1` (visual, 2 seeds):** null. The mushroom body receives essentially
    no optic-lobe input in release 783, so the required chain was bridged
    artificially; the word-class signal was already lost before the readout.
-2. **`odor-v1` (olfactory, current default, 1-seed reduced diagnostic):** null
-   at reduced power, but with **zero synthetic edges** — every simulated edge is
-   real `ALPN → Kenyon cell → MBON` connectivity. The output stage is no longer
-   silent (no-response 0.0–0.1), yet training drives mean dopamine to ≈ −0.5,
-   shrinks the readout toward a label prior, and trained accuracy (0.100) lands
-   *below* chance and below the untrained control (0.250).
+2. **`odor-v1` (olfactory, current default, 10-seed formal run):** null, but
+   with **zero synthetic edges** — every simulated edge is real
+   `ALPN → Kenyon cell → MBON` connectivity. Across 10 seeds the trained readout
+   scored **0.262** (95 % CI [0.237, 0.287]), not above chance 0.25 (p = 0.21),
+   and its untrained control scored 0.227. Every condition is at chance; the
+   output stage is not silent, so the signal is lost upstream of the readout.
 
 Both are documented in full in [docs/final-report.md] (negative results,
 reported without reframing). See [Known issues](#known-issues).
@@ -191,11 +191,18 @@ flyread calibrate                         # weight-scale search
 flyread benchmark                         # Task 0 feasibility gate
 flyread evaluate                          # all conditions x seeds + report
 flyread run                               # gate, then evaluate
+flyread sweep                             # formal: 1 seed/process across cores, then merge
+flyread merge                             # merge existing per-seed shards into a report
 flyread --config configs/smoke.yaml selftest   # fast end-to-end smoke check
 ```
 
 Useful flags: `--set key.path=value` (repeatable), `--seed N`,
-`--log-level DEBUG`.
+`--run-id NAME` (stable output dir; `evaluate` resumes if `results.json`
+exists), `--log-level DEBUG`.
+
+`sweep` runs each seed in its own `evaluate` process (default workers
+`cpu-2`), so a seed that finishes is kept and re-running the same command
+resumes the rest; it then merges the shards and writes `<run-id>-merged/`.
 
 `configs/default.yaml` is the full experiment. `configs/smoke.yaml` is the same
 code path with the subcircuit and trial budget shrunk for fast checks; it is
@@ -270,15 +277,19 @@ rendering, dataset splits, and trial order.
    seed lands at either silence or runaway; only a handful of scales sit in the
    0.5–15 Hz band. The accepted scale is real (recorded in the manifest), but
    throughput is dominated by the per-trial overhead of the growth wiring, so a
-   full ≥10-seed run is expensive.
+   full ≥10-seed run is expensive; `flyread sweep` runs one seed per core in
+   parallel (the formal 10-seed run took ≈ 13.8 h wall-clock on 12 cores vs
+   ≈ 126 h of single-core compute).
 2. **Brian2 falls back to NumPy codegen** when Cython compilation fails, which
    changes throughput by roughly 6–10×. On a machine with a partially broken
    Command Line Tools install the failure is a missing libc++ header
    (`fatal error: 'ios' file not found`) even though the headers exist under the
    SDK. Point clang at them for the run:
    `CPLUS_INCLUDE_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1`.
-   The run manifest records the resolved `codegen_target`; verify it says
-   `cython` before trusting any benchmark number.
+   The manifest records the *configured* `codegen_target`
+   (`simulation.codegen_target`, default `auto`), not the runtime resolution;
+   to confirm Cython actually compiled, check for fresh `_cython_magic_*.so`
+   files under `~/Library/Caches/cython/brian_extensions/` after a run.
 3. **Unit tests exist and pass** for the scoring, split, confusion, and
    significance code (`tests/test_dopamine_learning.py`, `test_evaluation.py`,
    `test_signal_path.py`, `test_structural_plasticity.py`, plus
@@ -309,14 +320,16 @@ rendering, dataset splits, and trial order.
    only amplify what the Kenyon cells encode, and under the calibrated regime
    the mushroom body does not carry decodable word-class activity at its output
    stage.
-8. **Odor (`odor-v1`): the readout still does not learn.** The reduced
-   single-seed run (`runs/run-20261009T095645Z`, 100 training trials)
-   removes the synthetic components but lands at trained 0.100 vs untrained
-   0.250 (chance 0.25). The output stage is no longer silent (no-response
-   0.0–0.1), so this is not an under-driven-output problem; the failure is in
-   the dopamine-gated `mushroom body → output` readout. Mean dopamine runs
-   ≈ −0.5, so the readout is punished on most trials and drifts toward a label
-   prior. This is a diagnostic, not the formal ≥ 10-seed result.
+8. **Odor (`odor-v1`): the readout does not learn — confirmed at 10 seeds.**
+   The formal run (`runs/odor-v1-merged`, 10 seeds, 600 training trials each)
+   removes the synthetic components and lands at trained 0.262 (95 % CI
+   [0.237, 0.287]) vs untrained 0.227, chance 0.25; every condition is
+   indistinguishable from chance (trained p = 0.21). The output stage is not
+   silent (trained no-response 0.257), so this is not an under-driven-output
+   problem; the signal is lost upstream of the readout and the dopamine-gated
+   `mushroom body → output` readout does not recover it. The reduced
+   single-seed diagnostic (`runs/run-20261009T095645Z`) showed the same failure
+   more dramatically (trained 0.100 vs untrained 0.250, mean dopamine ≈ −0.5).
 9. **The real `DAN → Kenyon cell` edges are extracted but not simulated.** The
    odor subcircuit contains 372 real `reinforcement → mushroom_body` edges, but
    `build_network` only simulates consecutive stage pairs, within-stage

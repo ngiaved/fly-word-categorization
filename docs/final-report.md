@@ -13,18 +13,22 @@ without reframing:
 
 **Neither task produced significant learning in the real evaluation pipeline.**
 The visual task is a documented negative result. The odor task removes every
-synthetic component the visual task needed, but a first single-seed reduced
-run still lands at or below chance.
+synthetic component the visual task needed, and the formal 10-seed run
+confirms the same null: with zero synthetic edges the trained readout still
+stays at chance.
 
 ## Headline
 
 | task | synthetic edges | trained held-out acc | status |
 |---|---|---|---|
 | grid-v1 (visual) | bridge + readout | 0.233 (2 seeds, 100 trials) | null |
-| odor-v1 (olfactory) | **none** | 0.100 (1 seed, 100 trials) | null at reduced power |
+| odor-v1 (olfactory) | **none** | **0.262** (10 seeds, 600 trials) | null (formal) |
 
-Both are against chance 0.25. The odor numbers are single-seed and
-under-powered; they are a diagnostic, not the formal ≥ 10-seed result.
+Both are against chance 0.25. The odor row is the formal ≥ 10-seed result
+required by the evaluation spec: across 10 seeds the trained readout scored
+0.262 (95 % CI [0.237, 0.287]), not significantly above chance (one-sample
+t-test p = 0.21, Wilcoxon p = 0.24), and its own untrained control scored
+0.227. It is a robust null, not an under-powered diagnostic.
 
 ---
 
@@ -121,12 +125,47 @@ Unlike the visual subcircuit, `real_edges_only.signal_reaches_outputs` is
 **true** with no bridge: the ALPN → KC → MBON chain is densely connected in
 the real data.
 
-### Measured result (reduced budget)
+### Measured result (formal, 10 seeds)
+
+Run `runs/odor-v1-merged`: 10 seeds (1000-1009), 600 training trials per
+seed, `eval_repeats = 3`, linear readout, calibrated scale 4.0, chance 0.25.
+Ten per-seed `evaluate` processes ran in parallel on 12 cores (`flyread
+sweep`) and were merged. Parallel wall-clock ≈ 13.8 h, against ≈ 126 h of
+single-core compute.
+
+| condition | mean acc | 95% CI | p vs chance | significant | no-response | train acc |
+|---|---|---|---|---|---|---|
+| untrained network | 0.227 | [0.195, 0.262] | 0.8850 | no | 0.013 | n/a |
+| trained (main result) | **0.262** | [0.237, 0.287] | 0.2069 | no | 0.257 | 0.219 |
+| shuffled training labels | 0.258 | [0.233, 0.282] | 0.2683 | no | 0.002 | 0.247 |
+| dopamine off | 0.245 | [0.205, 0.285] | 0.5887 | no | 0.000 | 0.252 |
+| structural plasticity on | 0.252 | [0.222, 0.283] | 0.4610 | no | 0.008 | 0.242 |
+| structural plasticity off | 0.253 | [0.227, 0.288] | 0.4228 | no | 0.260 | 0.224 |
+
+Every condition is statistically indistinguishable from chance at alpha 0.01.
+The trained mean sits ~1.2 points above chance, its 95 % CI spans
+0.237-0.287, and its own untrained control is *below* it (0.227) — the
+textbook signature of no learned class code. Unlike the visual task, the
+output stage is **not** silent in the trained condition (no-response 0.257)
+yet carries no class code, so the null is a signal loss upstream of the
+readout and survives the removal of every synthetic edge. The trained
+confusion matrix is nearly uniform, with a mild surplus in column 1:
+
+```
+true\pred |    0    1    2    3
+-------------------------------
+   animal |   38   44   35   33
+     food |   40   48   25   37
+     tool |   41   43   33   33
+    place |   46   39   27   38
+```
+
+### Reduced-budget diagnostic (superseded)
 
 Run `runs/run-20261009T095645Z`: 1 seed (1000), 100 training trials,
-`eval_repeats = 1`, linear readout, calibrated scale 4.0, chance 0.25. This is
-deliberately reduced (the spec minimum is 10 seeds) to get a fast diagnostic.
-Wall-clock 2,968 s.
+`eval_repeats = 1`, linear readout, calibrated scale 4.0, chance 0.25. This
+was deliberately reduced (the spec minimum is 10 seeds) to get a fast
+diagnostic. Wall-clock 2,968 s.
 
 | condition | mean acc | no-response | train acc |
 |---|---|---|---|
@@ -296,8 +335,10 @@ reframing, as the evaluation spec requires.
 - A supervised-pretraining initialisation of the plastic readout
   (`learning.pretrain`, implemented but off by default) would test whether the
   readout *can* carry the KC signal at all before blaming the learning rule.
-- The formal ≥ 10-seed run required by the evaluation spec, which no result
-  here has yet satisfied.
+- The formal ≥ 10-seed run is now complete (`runs/odor-v1-merged`) and is also
+  null (trained 0.262, p = 0.21), so the null is not an under-powering artifact.
+  Revisiting it means attacking the readout/credit-rule bottleneck above, not
+  adding seeds.
 
 ## Reproducing
 
@@ -306,12 +347,17 @@ python -m pip install -r requirements.lock.txt
 python -m pip install -e .
 python -m flyread fetch-data        # pin + verify FlyWire artifacts (CC-BY-NC)
 python -m flyread run               # calibrate -> gate -> evaluate -> report
+python -m flyread sweep             # formal: 10 seeds in parallel, then merge
 ```
 
-`flyread run` uses the default `odor-v1` config. The visual chain is reproduced
-with `flyread --config configs/smoke.yaml ...`.
+`flyread run` uses the default `odor-v1` config with its configured seed count.
+`flyread sweep` is the formal multi-seed path: it fans one `evaluate` process
+per seed across cores, skips seeds that already have a `results.json`
+(crash/resume), and merges the shards into `<run-id>-merged`. The visual chain
+is reproduced with `flyread --config configs/smoke.yaml ...`.
 
 Every archived run under `runs/` includes its manifest (config, seed state,
 checksums, annotation rules, calibration attempts, codegen target, hardware,
 git commit). The visual 2-seed run is `runs/run-20261008T204756Z/`; the odor
-reduced run is `runs/run-20261009T095645Z/`.
+reduced diagnostic is `runs/run-20261009T095645Z/`; the formal odor run is
+`runs/odor-v1-merged/`.

@@ -4,8 +4,10 @@ Each task references the spec it satisfies. Do not start Task 1+ until the
 Task 0 gate passes or scope is formally revised.
 
 Checkmark = implemented and covered by tests in this working tree. Item 7.4
-(the formal >= 10-seed significance run) and item 9 (final reproduction and
-report) require the completed foreground experiment runs and remain open.
+(the formal >= 10-seed significance run) and item 9.4 are now complete: the
+formal run is `runs/odor-v1-merged` (produced by `flyread sweep`) and is a
+null result. Item 9.3 (`openspec validate`) remains open because the OpenSpec
+CLI is not installed in this environment.
 
 ## 0. Feasibility gate (blocks everything else)
 - [ ] 0.1 Pin the FlyWire release and record file names, versions, checksums [connectome-loading]
@@ -68,7 +70,7 @@ report) require the completed foreground experiment runs and remain open.
 - [x] 7.1 Seeded train/test split (15/5 per category) [evaluation]
 - [x] 7.2 Train loop with learning curve recording [evaluation]
 - [x] 7.3 Baselines and ablations: untrained, shuffled labels, dopamine off, shuffled pixels, structural on/off [evaluation]
-- [ ] 7.4 Multi-seed runner (>= 10 seeds), statistics against 25% chance [evaluation]
+- [x] 7.4 Multi-seed runner (>= 10 seeds), statistics against 25% chance [evaluation] -> resumable parallel `flyread sweep` + `merge`; `runs/odor-v1-merged` (10 seeds) reports trained 0.262 (95% CI [0.237, 0.287], p = 0.21) = null
 - [x] 7.5 Confusion matrix, no-response rate, report generation [evaluation]
 - [x] 7.6 Data-leakage warning if shuffled labels exceed chance [evaluation]
 - [x] 7.7 Supervised linear decoder as the reported readout, fit on a fixed post-training feature pass [evaluation]
@@ -82,7 +84,7 @@ report) require the completed foreground experiment runs and remain open.
 - [x] 9.1 Single documented command sequence from clean checkout to report [reproducibility]
 - [x] 9.2 Final report, including negative or null results explicitly [evaluation] -> docs/final-report.md (visual 2-seed run and odor 1-seed reduced run are both null results; probe sweeps confirm the visual readout stays at chance)
 - [ ] 9.3 Run `openspec validate` (and verify/archive per your OpenSpec version) after implementation
-- [ ] 9.4 Formal >= 10-seed `odor-v1` run and report (the 1-seed run is a diagnostic only)
+- [x] 9.4 Formal >= 10-seed `odor-v1` run and report (the 1-seed run is a diagnostic only) -> `runs/odor-v1-merged/report.md`; trained 0.262 (95% CI [0.237, 0.287], p = 0.21) vs untrained 0.227, chance 0.25 = null; every condition at chance
 
 ## Open items [TO CONFIRM]
 - Significance level and number of seeds beyond 10
