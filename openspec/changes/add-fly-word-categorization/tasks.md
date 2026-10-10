@@ -6,8 +6,10 @@ Task 0 gate passes or scope is formally revised.
 Checkmark = implemented and covered by tests in this working tree. Item 7.4
 (the formal >= 10-seed significance run) and item 9.4 are now complete: the
 formal run is `runs/odor-v1-merged` (produced by `flyread sweep`) and is a
-null result. Item 9.3 (`openspec validate`) remains open because the OpenSpec
-CLI is not installed in this environment.
+null result. Item 9.3 (`openspec validate`) now passes with the OpenSpec CLI
+installed; the only open items are the Task 0 feasibility-gate checkboxes,
+which are historical (the work they gate was completed and is documented in
+proposal.md and design.md).
 
 ## 0. Feasibility gate (blocks everything else)
 - [ ] 0.1 Pin the FlyWire release and record file names, versions, checksums [connectome-loading]
@@ -83,7 +85,7 @@ CLI is not installed in this environment.
 ## 9. Reproduction and reporting
 - [x] 9.1 Single documented command sequence from clean checkout to report [reproducibility]
 - [x] 9.2 Final report, including negative or null results explicitly [evaluation] -> docs/final-report.md (visual 2-seed run and odor 1-seed reduced run are both null results; probe sweeps confirm the visual readout stays at chance)
-- [ ] 9.3 Run `openspec validate` (and verify/archive per your OpenSpec version) after implementation
+- [x] 9.3 Run `openspec validate` (and verify/archive per your OpenSpec version) after implementation -> `openspec validate --all` = 1 passed, 0 failed, 2 warnings (over-long requirement text) with `@fission-ai/openspec` 1.14.1; archiving intentionally not done
 - [x] 9.4 Formal >= 10-seed `odor-v1` run and report (the 1-seed run is a diagnostic only) -> `runs/odor-v1-merged/report.md`; trained 0.262 (95% CI [0.237, 0.287], p = 0.21) vs untrained 0.227, chance 0.25 = null; every condition at chance
 
 ## Open items [TO CONFIRM]

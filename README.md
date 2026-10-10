@@ -51,7 +51,8 @@ readout**. Two tasks have been run through the full pipeline:
    output stage is not silent, so the signal is lost upstream of the readout.
 
 Both are documented in full in [docs/final-report.md] (negative results,
-reported without reframing). See [Known issues](#known-issues).
+reported without reframing); a manuscript draft is in
+[docs/paper.md](docs/paper.md). See [Known issues](#known-issues).
 
 ---
 
