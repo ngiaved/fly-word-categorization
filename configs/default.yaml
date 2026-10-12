@@ -637,6 +637,10 @@ evaluation:
     - trained
     - shuffled_labels
     - dopamine_off
+    # Positive control: same pipeline, but the plastic readout is initialised
+    # with supervised logistic-regression weights before dopamine fine-tuning.
+    # Answers "can the readout express the class signal at all?".
+    - trained_pretrained
     # shuffled_pixels is a grid-v1 (visual) control only; it is meaningless
     # for odor-v1 inputs, whose pattern is the identity itself, so it is not
     # listed here.
@@ -678,6 +682,23 @@ evaluation:
   eval_repeats: 3
   # Raise a data-leakage warning when shuffled labels beat chance by this much.
   leakage_margin: 0.05
+  # Positive-control probes: linear decodability of the label from the input
+  # stage and from the Kenyon-cell representation, on the fixed untrained
+  # network (same supervised decoder as the main readout). The gate fails
+  # loudly when the instrument cannot express the signal, so a null at the
+  # output is never reported as a scientific finding on a broken pipeline.
+  probes:
+    enabled: true
+    # K-fold cross-validation over training presentations, used as the
+    # decodability estimate for the gate (a single fit on many Kenyon-cell
+    # features can memorise the training set).
+    cv_folds: 5
+    # Input probe must reach this held-out accuracy, or the stimulus does not
+    # encode the label at all.
+    input_min: 0.90
+    # Kenyon-cell probe must beat chance by at least this margin, or the class
+    # signal is lost before the plastic readout.
+    kc_margin: 0.05
 
 benchmark:
   # Task 0 feasibility gate.

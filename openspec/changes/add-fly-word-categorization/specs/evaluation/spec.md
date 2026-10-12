@@ -76,6 +76,43 @@ is still what drives dopamine credit during training.
 - AND for conditions without growth these vectors are identical to the tail of
   the training loop, so reported numbers are unchanged
 
+### Requirement: Positive controls (representation probes and gate)
+The system SHALL validate the evaluation instrument itself before a null is
+reported: it SHALL measure how much class information reaches each stage of the
+network as a linear decodability probe, and SHALL state whether a fixed readout
+can express the signal before the plasticity rule is blamed.
+
+#### Scenario: Probes on the stimulus and the Kenyon-cell code
+- GIVEN an untrained network and a seeded train/test word split
+- WHEN the positive-controls option is enabled (`evaluation.probes.enabled`)
+- THEN a linear probe is fit and evaluated on held-out words at the input stage
+  and at the Kenyon-cell (mushroom_body) stage of the fixed untrained network
+- AND training, cross-validation, and held-out accuracy, the number of features,
+  and the number of training presentations are reported per seed and aggregated
+  across seeds
+
+#### Scenario: Positive-control gate
+- GIVEN aggregate probe accuracy across seeds
+- WHEN the report is generated
+- THEN the gate passes only if the input probe decodes above the configured
+  minimum (`evaluation.probes.input_min`, default 0.90) and the Kenyon-cell
+  probe decodes above chance plus a margin (`evaluation.probes.kc_margin`,
+  default 0.05)
+- AND a FAILED gate states explicitly where the class signal is lost
+
+### Requirement: Supervised-pretraining positive control
+The system SHALL provide a condition in which the plastic readout is
+initialised from a supervised fit on the Kenyon-cell features before
+dopamine-gated learning, to test whether the readout can carry the Kenyon-cell
+signal at all.
+
+#### Scenario: Pretrained readout condition
+- GIVEN `learning.pretrain` enabled for a condition
+- WHEN that condition runs
+- THEN the readout weights are initialised by a supervised fit on the training
+  presentations of that seed
+- AND the condition's held-out accuracy is reported like every other condition
+
 ### Requirement: Negative results are reportable
 The system SHALL report results the same way whether or not learning exceeds chance.
 

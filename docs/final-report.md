@@ -15,7 +15,13 @@ without reframing:
 The visual task is a documented negative result. The odor task removes every
 synthetic component the visual task needed, and the formal 10-seed run
 confirms the same null: with zero synthetic edges the trained readout still
-stays at chance.
+stays at chance. **Positive controls resolve that null into a precise
+statement** (Section [Positive controls](#positive-controls-where-the-odor-signal-is-lost-confirmed)):
+the category is perfectly decodable at the stimulus (input probe 1.000), a
+supervised decoder memorises the Kenyon-cell presentations outright, and yet the
+Kenyon-cell population carries no generalisable class code (probe 0.255/0.227) —
+so the label is lost at the `ALPN → Kenyon cell` transform, before the plastic
+readout has anything to learn.
 
 ## Headline
 
@@ -197,15 +203,58 @@ true\pred |    0    1    2    3
     place |    4    0    0    1
 ```
 
-### Where the odor signal is lost (hypothesis, not yet confirmed)
+### Positive controls: where the odor signal is lost (confirmed)
 
-The output stage is no longer silent — `no-response` is 0.000–0.100, i.e. the
-`pair_gain.mushroom_body>output` knob (10.0) wakes the real KC → MBON readout.
-So unlike the visual task, this is not an under-driven-output problem. The
-observed pattern (KC population decodes well above chance in isolation, while
-the four output counts carry no class code) points at the plastic
-`mushroom body → output` projection and/or the dopamine credit rule as the
-bottleneck. This was not resolved within this change.
+To separate "the pipeline cannot detect learning" from "the network does not
+learn", the evaluation now fits supervised linear probes on a fresh *untrained*
+network at two stages — the input (`olfactory`, 673 features) and the
+Kenyon-cell population (`mushroom_body`, 384 features) — scored on held-out
+words, and runs a *positive-control gate* (input probe ≥ 0.90 AND Kenyon-cell
+probe ≥ chance + 0.05). Two new 10-seed runs add the probes, a
+supervised-pretrained readout condition, and a separable-task configuration
+(zero cross-category overlap):
+
+| run | config | purpose |
+|---|---|---|
+| `runs/pctrl-v1-merged` | `configs/default.yaml` | probes, gate, pretrained, default task |
+| `runs/pctrl-sep-merged` | `configs/odor-separable.yaml` | same, on trivially separable classes |
+
+**Probes, 10 seeds, chance 0.25 (held-out accuracy on unseen words):**
+
+| task | stage | features | train | CV | held-out | 95 % CI |
+|---|---|---|---|---|---|---|
+| default | input | 673 | 1.000 | 1.000 | **1.000** | [1.000, 1.000] |
+| default | Kenyon cell | 384 | 1.000 | 0.236 | **0.255** | [0.227, 0.287] |
+| separable | input | 673 | 1.000 | 1.000 | **1.000** | [1.000, 1.000] |
+| separable | Kenyon cell | 384 | 1.000 | 0.228 | **0.227** | [0.195, 0.262] |
+
+The input stage decodes the category perfectly on every seed — the stimulus
+genuinely reaches the network intact and the probe instrument works. The
+Kenyon-cell population decodes at chance in both tasks despite a training
+accuracy of 1.000 (the decoder memorises but has no class structure to
+generalise), with cross-validation agreeing. **The gate fails in both runs** with
+the same diagnosis:
+
+> input probe passes but the Kenyon-cell probe 0.255 is not above chance+0.05:
+> the label signal is lost before the plastic readout (upstream bottleneck).
+
+**Supervised pretraining does not help:** `trained_pretrained` fits the readout
+to train accuracy 1.000 on every seed, yet held-out is 0.268 (default) and
+0.235 (separable) — at chance and no better than plain `trained` (0.262, 0.248).
+The bottleneck is not readout capacity or initialisation.
+
+**Not task difficulty:** on the separable task the class structure is trivial
+(probe 1.000) and still nothing learns, so overlap is not the cause.
+
+**Location of the loss, refined.** Earlier this report floated the
+`mushroom body → output` readout/credit rule as the bottleneck. The probes move
+the blame upstream: the readout — probe decoder, fitted decoder, and
+supervised-pretrained decoder alike — is a valid instrument, and each memorises
+the Kenyon-cell features; the class information is absent from the
+**`ALPN → Kenyon cell` code** the readout would have to amplify. The plasticity
+rule and credit assignment are exonerated as the *first* cause.
+
+Full per-condition tables are in the archived `report.md` of each merged run.
 
 ### Known limitation of the current odor subcircuit
 
@@ -316,29 +365,35 @@ Within the calibrated spontaneous regime (weight scale 4, noise weight 4.0,
 background dc 0), the visual network — real connectivity plus the documented
 synthetic bridge — does not transfer a decodable word-class signal to its
 readout. The pivot to the real olfactory pathway removes the synthetic bridge
-and readout and gives the stimulus genuine category structure, yet the first
-reduced run still fails to learn. Taken together, the two negative results
-suggest the bottleneck is not the input encoding or the missing optic-lobe
-route, but the dopamine-gated `mushroom body → output` readout stage itself
-under this calibrated regime. This is reported as a negative result without
-reframing, as the evaluation spec requires.
+and readout and gives the stimulus genuine category structure, yet the formal
+runs still fail to learn. Positive controls then localise the common cause: the
+input stage decodes the category perfectly (probe 1.000), the readout is a
+valid instrument, and the Kenyon-cell population decodes at chance under the
+same instrument. The bottleneck is therefore the **`ALPN → Kenyon cell`
+transform** — the code the readout would have to amplify does not linearly
+carry the label — not the input encoding, the missing optic-lobe route, the
+plastic `mushroom body → output` readout, or its credit rule. This is reported
+as a negative result without reframing, as the evaluation spec requires.
 
 ## What would need to change to revisit it
 
-- Make the plasticity actually shape a class code: the per-class credit rule
-  currently drives mean dopamine strongly negative (≈ −0.5) and shrinks the
-  readout toward a prior. A reward-prediction-error baseline that is not
-  dominated by the ~75 % wrong-at-chance surplus is the obvious first target.
-- Simulate the real `DAN → mushroom body` edges (reorder stages so
+- **Recode the `ALPN → Kenyon cell` stage.** The probes put the failure here:
+  the stimulus decodes at 1.000 and the readout is a working instrument, but
+  the Kenyon-cell population does not carry the class. Denser or sparser
+  Kenyon-cell representations, input scaling, or non-linear decoding are the
+  direct experiments.
+- **A reward-prediction-error baseline** for the per-class credit rule, so mean
+  dopamine is not dominated by the ≈75 % wrong-at-chance surplus (relevant once
+  a class code exists to learn).
+- **Simulate the real `DAN → mushroom body` edges** (reorder stages so
   `reinforcement` precedes `mushroom_body`) instead of the global-scalar
   surrogate, so the teacher flows through real synapses.
-- A supervised-pretraining initialisation of the plastic readout
-  (`learning.pretrain`, implemented but off by default) would test whether the
-  readout *can* carry the KC signal at all before blaming the learning rule.
-- The formal ≥ 10-seed run is now complete (`runs/odor-v1-merged`) and is also
-  null (trained 0.262, p = 0.21), so the null is not an under-powering artifact.
-  Revisiting it means attacking the readout/credit-rule bottleneck above, not
-  adding seeds.
+- Supervised pretraining (`learning.pretrain`) is now **tested and negative**:
+  it fits the Kenyon-cell features to 1.000 yet generalises at chance, closing
+  an earlier open item.
+- Adding seeds will not change the result: the formal ≥ 10-seed runs
+  (`runs/odor-v1-merged`, `runs/pctrl-v1-merged`, `runs/pctrl-sep-merged`) all
+  exclude under-powering.
 
 ## Reproducing
 
@@ -346,18 +401,23 @@ reframing, as the evaluation spec requires.
 python -m pip install -r requirements.lock.txt
 python -m pip install -e .
 python -m flyread fetch-data        # pin + verify FlyWire artifacts (CC-BY-NC)
-python -m flyread run               # calibrate -> gate -> evaluate -> report
+python -m flyread run               # calibrate -> gate -> evaluate -> report (default config)
 python -m flyread sweep             # formal: 10 seeds in parallel, then merge
+python -m flyread --config configs/odor-separable.yaml --run-id pctrl-sep sweep  # separable-task control
 ```
 
 `flyread run` uses the default `odor-v1` config with its configured seed count.
 `flyread sweep` is the formal multi-seed path: it fans one `evaluate` process
 per seed across cores, skips seeds that already have a `results.json`
 (crash/resume), and merges the shards into `<run-id>-merged`. The visual chain
-is reproduced with `flyread --config configs/smoke.yaml ...`.
+is reproduced with `flyread --config configs/smoke.yaml ...`. The
+positive-control package (input/Kenyon-cell probes, gate, supervised-pretrained
+condition) is on by default (`evaluation.probes.enabled`) under
+`configs/default.yaml`.
 
 Every archived run under `runs/` includes its manifest (config, seed state,
 checksums, annotation rules, calibration attempts, codegen target, hardware,
 git commit). The visual 2-seed run is `runs/run-20261008T204756Z/`; the odor
 reduced diagnostic is `runs/run-20261009T095645Z/`; the formal odor run is
-`runs/odor-v1-merged/`.
+`runs/odor-v1-merged/`; the positive-control runs are `runs/pctrl-v1-merged/`
+and `runs/pctrl-sep-merged/`.

@@ -35,6 +35,12 @@ CONDITIONS: dict[str, dict[str, Any]] = {
     "shuffled_pixels": {"trained": True, "shuffle_pixels": True},
     "structural_on": {"trained": True, "structural": True},
     "structural_off": {"trained": True, "structural": False},
+    # Positive control: the SAME pipeline and plastic readout, but the readout
+    # starts from supervised logistic-regression weights instead of noise
+    # (learning.pretrain). Dopamine then fine-tunes from an informative start.
+    # A no-growth control (structural disabled) so it differs from
+    # structural_on/off only by the pretraining.
+    "trained_pretrained": {"trained": True, "structural": False, "pretrain": True},
 }
 
 
@@ -370,6 +376,8 @@ def condition_config(config, condition: str):
         overrides.append("structural.enabled=false")
     if settings.get("shuffle_pixels"):
         overrides.append("encoding.shuffle_pixels=true")
+    if settings.get("pretrain"):
+        overrides.append("learning.pretrain=true")
 
     run_config = deepcopy(config.to_dict())
     from .config import Config
@@ -559,6 +567,136 @@ def run_condition(
     )
 
 
+def representation_probes(
+    subcircuit,
+    config,
+    weight_scale: float,
+    dataset: Dataset,
+    split: Split,
+    seed: int,
+) -> dict[str, Any]:
+    """Linear decodability of the category label from upstream representations.
+
+    Positive-control ceiling. Fits the same supervised linear decoder the main
+    readout uses on the per-trial spike counts of the input stage and of the
+    Kenyon-cell (``mushroom_body``) stage, on a fixed untrained network. Neither
+    stage is downstream of the plastic KC -> MBON set, so the numbers are a
+    property of the stimulus + connectome, not of learning.
+
+    The two rungs answer different questions. If the *input* probe is at chance
+    the stimulus does not encode the label and nothing downstream can recover
+    it (harness/encoding bug). If the input probe is high but the *Kenyon-cell*
+    probe is at chance, the representational signal is lost before the plastic
+    readout (upstream bottleneck). Only if both are above chance does a null at
+    the output isolate the plastic readout / three-factor learning rule.
+    """
+    from .learning import decoder_predict, fit_readout_decoder
+    from .network import build_network
+
+    network = build_network(subcircuit, config, weight_scale=weight_scale)
+    input_count = len(subcircuit.roles[list(subcircuit.roles)[0]])
+    mapping = make_mapping(config, seed=seed, n_inputs=input_count, dataset=dataset)
+    runner = TrialRunner(network, config, mapping, seed=seed)
+
+    stage_names = list(network.stages)
+    stage_for = {
+        "input": stage_names[0],
+        "mushroom_body": "mushroom_body" if "mushroom_body" in stage_names
+        else (stage_names[-1] if stage_names else "mushroom_body"),
+    }
+
+    # Mirror the main readout's decoder protocol exactly so the probe is a fair
+    # ceiling: fit on ``decoder_window`` cyclic presentations of the training
+    # words (not one each), and read out ``eval_repeats`` presentations per
+    # held-out word. A decoder fit on 60 samples over 384 Kenyon-cell features
+    # memorises the training set and does not generalise, which understates the
+    # representation; the cyclic budget matches the budget the plastic readout
+    # is actually judged against.
+    dec_window = int(config.get("evaluation.decoder_window", 200))
+    repeats = int(config.get("evaluation.eval_repeats", 1))
+    order = make_rng(seed, stream="probe-train-order").permutation(len(split.train))
+
+    features: dict[str, list[np.ndarray]] = {key: [] for key in stage_for}
+    train_labels: list[int] = []
+    for exp in range(dec_window):
+        item = split.train[int(order[exp % len(order)])]
+        runner.run_trial(item.word, item.label, 400_000 + exp, learn=False)
+        window = runner.last_window or {}
+        for key, stage in stage_for.items():
+            vec = window.get(stage)
+            features[key].append(
+                np.asarray(vec, dtype=np.float64)
+                if vec is not None else np.zeros(0, dtype=np.float64)
+            )
+        train_labels.append(int(item.label))
+
+    test_features: dict[str, list[np.ndarray]] = {key: [] for key in stage_for}
+    test_labels: list[int] = []
+    for rep in range(max(1, repeats)):
+        for index, item in enumerate(split.test):
+            runner.run_trial(item.word, item.label, 500_000 + rep * 1000 + index,
+                             learn=False)
+            window = runner.last_window or {}
+            for key, stage in stage_for.items():
+                vec = window.get(stage)
+                test_features[key].append(
+                    np.asarray(vec, dtype=np.float64)
+                    if vec is not None else np.zeros(0, dtype=np.float64)
+                )
+            test_labels.append(int(item.label))
+
+    n_classes = len(dataset.categories)
+    train_y = np.asarray(train_labels, dtype=np.int64)
+    test_y = np.asarray(test_labels, dtype=np.int64)
+    cv_folds = max(2, int(config.get("evaluation.probes.cv_folds", 5)))
+    result: dict[str, Any] = {}
+    for key in stage_for:
+        train_x = np.asarray(features[key], dtype=np.float64)
+        test_x = np.asarray(test_features[key], dtype=np.float64)
+        entry: dict[str, Any] = {
+            "stage": stage_for[key],
+            "n_features": int(train_x.shape[1]) if train_x.ndim == 2 else 0,
+            "n_train_presentations": int(train_x.shape[0]) if train_x.ndim == 2 else 0,
+            "cv_folds": cv_folds,
+        }
+        if train_x.ndim == 2 and train_x.size and len(np.unique(train_y)) >= 2:
+            decoder = fit_readout_decoder(train_x, train_y, n_classes, config)
+            entry["train_accuracy"] = float(
+                (decoder_predict(train_x, decoder) == train_y).mean()
+            )
+            entry["test_accuracy"] = float(
+                (decoder_predict(test_x, decoder) == test_y).mean()
+            )
+            # K-fold CV over the training presentations is the decodability
+            # estimate the gate uses: a single fit on 384 Kenyon-cell features
+            # can memorise the training set, so held-out test accuracy alone
+            # understates (or overstates) what the representation carries.
+            fold_ids = make_rng(seed, stream=f"probe-cv:{key}").integers(
+                0, cv_folds, size=train_y.size
+            )
+            cv_pred = np.full(train_y.shape, -1, dtype=np.int64)
+            for fold in range(cv_folds):
+                hold = fold_ids == fold
+                fit = ~hold
+                if len(np.unique(train_y[fit])) < 2 or not hold.any():
+                    continue
+                fold_decoder = fit_readout_decoder(
+                    train_x[fit], train_y[fit], n_classes, config
+                )
+                cv_pred[hold] = decoder_predict(train_x[hold], fold_decoder)
+            covered = cv_pred >= 0
+            entry["cv_accuracy"] = (
+                float((cv_pred[covered] == train_y[covered]).mean())
+                if covered.any() else float("nan")
+            )
+        else:
+            entry["train_accuracy"] = float("nan")
+            entry["test_accuracy"] = float("nan")
+            entry["cv_accuracy"] = float("nan")
+        result[key] = entry
+    return result
+
+
 @dataclass
 class SeedResult:
     """All conditions for one seed."""
@@ -567,6 +705,7 @@ class SeedResult:
     results: dict[str, RunResult]
     weight_scale: float
     seconds: float
+    probes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -581,6 +720,8 @@ class EvaluationReport:
     leakage_warning: str | None
     splits: dict[int, dict[str, Any]]
     metadata: dict[str, Any]
+    probes: dict[str, Any] = field(default_factory=dict)
+    positive_control: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -592,6 +733,8 @@ class EvaluationReport:
             "data_leakage_warning": self.leakage_warning,
             "splits": self.splits,
             "metadata": self.metadata,
+            "probes": self.probes,
+            "positive_control": self.positive_control,
         }
 
 
@@ -630,6 +773,117 @@ def train_seed(
         weight_scale=weight_scale,
         seconds=time.perf_counter() - started,
     )
+
+
+def _aggregate_probes(
+    seed_results: Sequence[SeedResult], chance: float, config
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Mean/CI per probe stage across seeds, plus the positive-control gate.
+
+    Gate definition (configurable): the harness is validated when the input
+    probe reaches at least ``evaluation.probes.input_min`` AND the Kenyon-cell
+    probe beats chance by ``evaluation.probes.kc_margin``. Failing the first
+    means the stimulus does not encode the label (encoding/harness fault);
+    failing the second means the MB representation carries no usable signal, so
+    the bottleneck is upstream of the plastic readout. Only when the gate passes
+    is a null at the output attributable to the readout/learning rule.
+    """
+    stages: dict[str, list[float]] = {}
+    train_by_stage: dict[str, list[float]] = {}
+    cv_by_stage: dict[str, list[float]] = {}
+    stage_names: dict[str, str] = {}
+    n_features_by_stage: dict[str, int] = {}
+    for seed_result in seed_results:
+        for key, entry in (seed_result.probes or {}).items():
+            value = entry.get("test_accuracy")
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                continue
+            stages.setdefault(key, []).append(float(value))
+            train_value = entry.get("train_accuracy")
+            if train_value is not None and not (
+                isinstance(train_value, float) and np.isnan(train_value)
+            ):
+                train_by_stage.setdefault(key, []).append(float(train_value))
+            cv_value = entry.get("cv_accuracy")
+            if cv_value is not None and not (
+                isinstance(cv_value, float) and np.isnan(cv_value)
+            ):
+                cv_by_stage.setdefault(key, []).append(float(cv_value))
+            stage_names[key] = str(entry.get("stage", key))
+            n_features_by_stage[key] = int(entry.get("n_features", 0))
+
+    aggregated: dict[str, Any] = {}
+    for key, values in stages.items():
+        ci_low, ci_high = bootstrap_ci(
+            values,
+            level=float(config.get("evaluation.ci_level")),
+            resamples=int(config.get("evaluation.ci_resamples")),
+            seed=int((config.get("evaluation.base_seed") or 0)),
+        )
+        aggregated[key] = {
+            "stage": stage_names.get(key, key),
+            "n_features": n_features_by_stage.get(key, 0),
+            "n_seeds": len(values),
+            "mean_test_accuracy": float(np.mean(values)),
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "mean_train_accuracy": (
+                float(np.mean(train_by_stage[key]))
+                if train_by_stage.get(key) else None
+            ),
+            "mean_cv_accuracy": (
+                float(np.mean(cv_by_stage[key]))
+                if cv_by_stage.get(key) else None
+            ),
+            "per_seed_test_accuracy": values,
+        }
+
+    enabled = bool(config.get("evaluation.probes.enabled", False))
+    input_min = float(config.get("evaluation.probes.input_min", 0.90))
+    kc_margin = float(config.get("evaluation.probes.kc_margin", 0.05))
+    gate: dict[str, Any] = {
+        "enabled": enabled,
+        "input_min": input_min,
+        "kc_margin": kc_margin,
+    }
+    if not enabled or not aggregated:
+        gate["passed"] = None
+        gate["detail"] = "probes were not run (evaluation.probes.enabled is false)"
+        return aggregated, gate
+
+    input_acc = aggregated.get("input", {}).get("mean_test_accuracy")
+    kc_acc = aggregated.get("mushroom_body", {}).get("mean_test_accuracy")
+    gate["input_probe_accuracy"] = input_acc
+    gate["kc_probe_accuracy"] = kc_acc
+    gate["decision_metric"] = "held-out accuracy on unseen words"
+    input_ok = input_acc is not None and input_acc >= input_min
+    kc_ok = kc_acc is not None and kc_acc >= chance + kc_margin
+    gate["input_ok"] = bool(input_ok)
+    gate["kc_ok"] = bool(kc_ok)
+    gate["passed"] = bool(input_ok and kc_ok)
+    if not input_ok:
+        gate["detail"] = (
+            f"input probe {_fmt_pct(input_acc)} is below the {input_min:.2f} "
+            "floor: the stimulus does not encode the label, so a null at the "
+            "output is uninformative (encoding/harness fault)."
+        )
+    elif not kc_ok:
+        gate["detail"] = (
+            f"input probe passes but the Kenyon-cell probe "
+            f"{_fmt_pct(kc_acc)} is not above chance+{kc_margin:.2f}: the label "
+            "signal is lost before the plastic readout (upstream bottleneck)."
+        )
+    else:
+        gate["detail"] = (
+            f"input probe {_fmt_pct(input_acc)} and Kenyon-cell probe "
+            f"{_fmt_pct(kc_acc)} both exceed their floors, so a null at the "
+            "output isolates the plastic readout / learning rule."
+        )
+    return aggregated, gate
+
+
+def _fmt_pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
 
 
 def aggregate(
@@ -700,6 +954,10 @@ def aggregate(
         )
         LOGGER.warning("%s", leakage_warning)
 
+    probes, positive_control = _aggregate_probes(seed_results, chance, config)
+    if positive_control.get("passed") is False:
+        LOGGER.warning("positive-control gate FAILED: %s", positive_control.get("detail"))
+
     return EvaluationReport(
         conditions=conditions,
         per_seed=per_seed,
@@ -709,6 +967,8 @@ def aggregate(
         leakage_warning=leakage_warning,
         splits=splits,
         metadata=metadata or {},
+        probes=probes,
+        positive_control=positive_control,
     )
 
 

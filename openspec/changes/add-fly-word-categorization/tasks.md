@@ -11,6 +11,14 @@ installed; the only open items are the Task 0 feasibility-gate checkboxes,
 which are historical (the work they gate was completed and is documented in
 proposal.md and design.md).
 
+Items 7.8-7.10 add the positive-control package: representation probes at the
+input and Kenyon-cell stages plus an acceptance gate (item 7.8), a
+supervised-pretrained readout condition (item 7.9), and a separable-task control
+(item 7.10). Completed runs: `runs/pctrl-v1-merged` (default odor task; probe
+input 1.000, Kenyon-cell 0.255, gate FAILED = signal lost before the plastic
+readout) and `runs/pctrl-sep-merged` (separable task; probe input 1.000,
+Kenyon-cell 0.227, gate FAILED).
+
 ## 0. Feasibility gate (blocks everything else)
 - [ ] 0.1 Pin the FlyWire release and record file names, versions, checksums [connectome-loading]
 - [ ] 0.2 Inspect real file schemas; list actual column names (do not assume) [connectome-loading]
@@ -76,6 +84,9 @@ proposal.md and design.md).
 - [x] 7.5 Confusion matrix, no-response rate, report generation [evaluation]
 - [x] 7.6 Data-leakage warning if shuffled labels exceed chance [evaluation]
 - [x] 7.7 Supervised linear decoder as the reported readout, fit on a fixed post-training feature pass [evaluation]
+- [x] 7.8 Representation probes (input + Kenyon-cell stages) and the positive-control gate [evaluation] -> `representation_probes` in evaluate.py, `positive_control_section` in report.py; README/NOTES below and specs/evaluation; `runs/pctrl-v1-merged` gate FAILED: input 1.000, Kenyon-cell 0.255 (chance 0.25, margin 0.05) = signal lost before the plastic readout
+- [x] 7.9 Supervised-pretrained readout condition (`learning.pretrain`) [dopamine-learning] -> added `trained_pretrained` condition; pretrain fits training words (train acc 1.000) yet held-out 0.268 (pctrl-v1) / 0.235 (pctrl-sep) = no recovery
+- [x] 7.10 Separable-task control (zero cross-category overlap) [odor-encoding] -> `configs/odor-separable.yaml` (`encoding.odor.active_elsewhere: 0`); `runs/pctrl-sep-merged` all conditions null, probe KC 0.227, gate FAILED
 
 ## 8. Testing
 - [x] 8.1 One automated test per spec scenario (test groups per spec module) [evaluation]

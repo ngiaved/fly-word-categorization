@@ -49,6 +49,15 @@ readout**. Two tasks have been run through the full pipeline:
    scored **0.262** (95 % CI [0.237, 0.287]), not above chance 0.25 (p = 0.21),
    and its untrained control scored 0.227. Every condition is at chance; the
    output stage is not silent, so the signal is lost upstream of the readout.
+3. **Positive controls (10 seeds, two tasks):** the evaluation instrument is
+   now validated and the null is localised. A supervised linear probe decodes
+   the category **perfectly from the stimulus** (input probe 1.000 on every
+   seed) but **at chance from the Kenyon-cell population** (probe 0.255
+   default / 0.227 separable task), so the positive-control gate fails with
+   "the label signal is lost before the plastic readout". A supervised-
+   pretrained readout that fits the Kenyon-cell features to 1.000 still
+   generalises at chance, on both an overlapping and a trivially separable
+   task. **The bottleneck is the `ALPN → Kenyon cell` transform.**
 
 Both are documented in full in [docs/final-report.md] (negative results,
 reported without reframing); a manuscript draft is in
@@ -331,6 +340,13 @@ rendering, dataset splits, and trial order.
    `mushroom body → output` readout does not recover it. The reduced
    single-seed diagnostic (`runs/run-20261009T095645Z`) showed the same failure
    more dramatically (trained 0.100 vs untrained 0.250, mean dopamine ≈ −0.5).
+   **The positive controls (see the deviation entries on probes, pretraining,
+   and the separable task; runs `runs/pctrl-v1-merged` /
+   `runs/pctrl-sep-merged`) now localise it:** the
+   input probe scores 1.000 and the Kenyon-cell probe scores at chance
+   (0.255 / 0.227; train 1.000, CV ≈ 0.23), the gate fails, and supervised
+   pretraining still generalises at chance — so the class information is lost
+   at the `ALPN → Kenyon cell` transform, not at the readout or the rule.
 9. **The real `DAN → Kenyon cell` edges are extracted but not simulated.** The
    odor subcircuit contains 372 real `reinforcement → mushroom_body` edges, but
    `build_network` only simulates consecutive stage pairs, within-stage
@@ -379,6 +395,20 @@ rendering, dataset splits, and trial order.
   `GridMapping` or an `OdorMapping`, both exposing `stimulus(word, config)`.
   This is a `[TO CONFIRM]` scope change relative to the original visual-only
   proposal; see `openspec/changes/add-fly-word-categorization/specs/odor-encoding/`.
+- **Representation probes and a positive-control gate** were added to the
+  evaluation (`evaluation.probes.{enabled,cv_folds,input_min,kc_margin}`, on by
+  default): linear probes of class decodability at the input and Kenyon-cell
+  stages of a fresh untrained network, plus a gate (input ≥ 0.90 AND
+  Kenyon-cell ≥ chance + 0.05) that makes a null attributable to the
+  instrument impossible to report silently.
+- **A supervised-pretrained readout condition** (`trained_pretrained`,
+  `learning.pretrain`) initialises the plastic readout from a supervised fit on
+  that seed's Kenyon-cell features. It is a positive control: it fits the
+  training words (train accuracy 1.000) and still generalises at chance.
+- **A separable-task control** (`configs/odor-separable.yaml`,
+  `encoding.odor.active_elsewhere: 0`) makes the four categories disjoint by
+  construction, so a trivial linear readout of the stimulus solves the task
+  (input probe 1.000) while the network and probes still land at chance.
 
 ## Licensing
 

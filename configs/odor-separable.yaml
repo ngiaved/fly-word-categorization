@@ -1,0 +1,26 @@
+# Positive-control task: the SAME odor-v1 pipeline with zero cross-category
+# overlap. `active_elsewhere: 0` removes the cross-category receptors, so every
+# word activates only its category's disjoint prototype block and the four
+# classes are linearly separable by construction.
+#
+# Use this to answer "is the pipeline capable of learning at all?". If the
+# trained condition still sits at chance here, the failure is in the harness or
+# the learning rule, not in task difficulty. Compare against the default
+# (active_elsewhere: 4), where the classes genuinely overlap.
+#
+#   flyread --config configs/odor-separable.yaml sweep
+#
+# A difficulty curriculum is the overlap itself: sweep active_elsewhere over
+# {0, 2, 4, 8} with `--set encoding.odor.active_elsewhere=N`; monotone accuracy
+# from 0 upward shows the rule learns as the classes separate.
+
+encoding:
+  odor:
+    active_elsewhere: 0
+
+evaluation:
+  conditions:
+    - untrained
+    - trained
+    - trained_pretrained
+    - dopamine_off

@@ -25,6 +25,7 @@ CONDITION_LABELS: dict[str, str] = {
     "shuffled_pixels": "shuffled pixels",
     "structural_on": "structural plasticity on",
     "structural_off": "structural plasticity off",
+    "trained_pretrained": "trained + supervised pretrain (positive control)",
 }
 
 
@@ -210,6 +211,57 @@ def _fmt_int(value: int | None) -> str:
     return str(value) if value is not None else "n/a"
 
 
+def positive_control_section(report: EvaluationReport) -> str:
+    """Markdown section for the upstream probes and the positive-control gate.
+
+    Returns an empty string when no probes were run, so probe-disabled reports
+    are unchanged. The gate exists so a null result is never reported as a
+    scientific finding when the instrument could not even express the signal.
+    """
+    gate = report.positive_control or {}
+    probes = report.probes or {}
+    if not probes and not gate.get("enabled"):
+        return ""
+
+    lines = ["## Positive controls", ""]
+    if probes:
+        lines += [
+            "Linear decodability of the category label from per-trial spike "
+            "counts, on the fixed untrained network (same supervised decoder as "
+            "the main readout). These stages are upstream of the plastic "
+            "KC -> MBON set, so they bound what the readout could learn from. "
+            "The gate decides on held-out accuracy on unseen words (parallel to "
+            "the main readout); CV-over-presentations is shown as a diagnostic "
+            "(it leaks word identity and can exceed generalisation).",
+            "",
+            "| stage | probe | mean held-out acc | 95% CI | mean CV acc | mean train acc |",
+            "|---|---|---|---|---|---|",
+        ]
+        for key, stats in probes.items():
+            ci = f"[{_fmt(stats.get('ci_low'))}, {_fmt(stats.get('ci_high'))}]"
+            lines.append(
+                f"| {stats.get('stage', key)} | {key} | "
+                f"{_fmt(stats.get('mean_test_accuracy'))} | {ci} | "
+                f"{_fmt(stats.get('mean_cv_accuracy'))} | "
+                f"{_fmt(stats.get('mean_train_accuracy'))} |"
+            )
+        lines.append("")
+
+    if gate.get("enabled") and gate.get("passed") is not None:
+        verdict = "PASSED" if gate.get("passed") else "FAILED"
+        lines += [
+            f"**Positive-control gate: {verdict}** (input probe >= "
+            f"{_fmt(gate.get('input_min'))}, Kenyon-cell probe >= chance + "
+            f"{_fmt(gate.get('kc_margin'))})",
+            "",
+            str(gate.get("detail", "")),
+            "",
+        ]
+    elif not gate.get("enabled"):
+        lines += ["Positive-control gate disabled (`evaluation.probes.enabled`).", ""]
+    return "\n".join(lines)
+
+
 def build_markdown(
     report: EvaluationReport,
     seed_results: Sequence[SeedResult],
@@ -261,6 +313,10 @@ def build_markdown(
             name = categories[label] if label < len(categories) else str(label)
             lines.append(f"- {name}: {_fmt(value)}")
         lines.append("")
+
+    control = positive_control_section(report)
+    if control:
+        lines += [control, ""]
 
     lines += [
         "## Setup",
@@ -317,6 +373,9 @@ def write_json(report: EvaluationReport, seed_results: Sequence[SeedResult], pat
         for sr in seed_results
     }
     payload["seed_seconds"] = {str(sr.seed): sr.seconds for sr in seed_results}
+    payload["probes_per_seed"] = {
+        str(sr.seed): sr.probes for sr in seed_results if sr.probes
+    }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(

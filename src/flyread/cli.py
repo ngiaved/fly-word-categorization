@@ -303,6 +303,7 @@ def cmd_evaluate(args, config: Config) -> int:
         aggregate,
         confusion_matrix_total,
         make_split,
+        representation_probes,
         run_condition,
     )
     from .network import calibrate
@@ -378,10 +379,22 @@ def cmd_evaluate(args, config: Config) -> int:
                 )
         from .evaluate import SeedResult
 
+        probes = {}
+        if bool(config.get("evaluation.probes.enabled", False)):
+            probes = representation_probes(
+                subcircuit, run_config, weight_scale, dataset, split, run_seed
+            )
+            LOGGER.info(
+                "[%d/%d] seed %d probes: input %.3f, KC %.3f",
+                index, n_seeds, run_seed,
+                probes.get("input", {}).get("test_accuracy", float("nan")),
+                probes.get("mushroom_body", {}).get("test_accuracy", float("nan")),
+            )
+
         all_results.append(
             SeedResult(
                 seed=run_seed, results=per_condition, weight_scale=weight_scale,
-                seconds=time.perf_counter() - started,
+                seconds=time.perf_counter() - started, probes=probes,
             )
         )
     total_seconds = time.perf_counter() - started
@@ -410,6 +423,8 @@ def cmd_evaluate(args, config: Config) -> int:
         "per_seed": report.per_seed,
         "data_leakage_warning": report.leakage_warning,
         "confusion_matrix_total": confusion.as_list(),
+        "probes": report.probes,
+        "positive_control": report.positive_control,
         "total_seconds": total_seconds,
     }
     manifest.write(run_dir)
@@ -543,9 +558,10 @@ def _load_seed_results(payload: dict[str, Any], n_categories: int):
             )
         weight_scale = (payload.get("metadata") or {}).get("weight_scale")
         seconds = float(payload.get("seed_seconds", {}).get(seed_str, 0.0) or 0.0)
+        probes = (payload.get("probes_per_seed") or {}).get(seed_str, {}) or {}
         seed_results.append(
             SeedResult(seed=seed, results=results, weight_scale=weight_scale,
-                       seconds=seconds)
+                       seconds=seconds, probes=probes)
         )
     seed_results.sort(key=lambda sr: sr.seed)
     return seed_results
@@ -646,6 +662,8 @@ def merge_runs(config: Config, run_ids: Sequence[str], out_run_id: str) -> int:
         "per_seed": report.per_seed,
         "data_leakage_warning": report.leakage_warning,
         "confusion_matrix_total": confusion.as_list(),
+        "probes": report.probes,
+        "positive_control": report.positive_control,
         "total_seconds": metadata["total_seconds"],
     }
     manifest.write(out_dir)
@@ -672,7 +690,7 @@ def cmd_sweep(args, config: Config) -> int:
     n_seeds = int(getattr(args, "n_seeds", None) or config.get("evaluation.n_seeds"))
     workers = int(
         getattr(args, "workers", None)
-        or config.get("evaluation.workers")
+        or config.get("evaluation.workers", None)
         or max(1, (os.cpu_count() or 2) - 2)
     )
     workers = max(1, min(workers, n_seeds))

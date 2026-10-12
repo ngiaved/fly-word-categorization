@@ -28,11 +28,20 @@ Wilcoxon signed-rank *p* = 0.24). Every control condition — untrained, shuffle
 training labels, dopamine off, structural plasticity on/off — was likewise
 indistinguishable from chance at α = 0.01. Because the output stage is *not*
 silent in the trained condition (no-response rate 0.257), the failure is not an
-under-driven readout but a loss of decodable class information upstream of it,
-together with a credit-assignment rule that drives the plastic weights toward a
-label prior rather than a class code. We report this as a negative result
-without reframing, and release the full pipeline, manifests, and the failing
-run alongside the code.
+under-driven readout but a loss of decodable class information upstream of it.
+Positive controls then localise that loss precisely. A supervised linear probe
+decodes the category perfectly from the stimulus stage (held-out accuracy 1.000
+on unseen words) but at chance from the Kenyon-cell population (0.255,
+95 % CI [0.227, 0.287]), so the positive-control gate fails: the class signal
+that demonstrably reaches the network is gone before the plastic readout. A
+supervised-pretrained readout — initialised from a perfect fit on the
+Kenyon-cell features (training accuracy 1.000) — still generalises at chance,
+and a second task with perfectly separable categories reproduces the same null
+(probe: input 1.000, Kenyon cell 0.227). The Kenyon-cell code the readout would
+have to use does not linearly carry the label, which is why no learning rule or
+pretraining recovers it. We report this as a negative result without reframing,
+and release the full pipeline, manifests, and the failing runs alongside the
+code.
 
 ## 1. Introduction
 
@@ -149,12 +158,35 @@ post-training feature pass (a specified, documented departure from pure online
 readout: it isolates *representation* quality from *decoding*). Warnings are
 emitted if shuffled-label control accuracy exceeds a leakage margin.
 
+**Representation probes.** To separate "the network cannot learn" from "the
+evaluation cannot detect learning", two linear probes are fitted on a *fresh
+untrained* network and scored on held-out words with the same decoder protocol:
+one on the input stage (which the stimulus reaches directly) and one on the
+Kenyon-cell stage. A probe reports training, k-fold cross-validation, and
+held-out accuracy, the number of features, and the number of training
+presentations, per seed and aggregated across seeds. A *positive-control gate*
+passes only if the input probe decodes above 0.90 and the Kenyon-cell probe
+above chance + 0.05; a failed gate states explicitly where the class signal is
+lost.
+
+**Supervised-pretrained readout.** A seventh condition (`trained_pretrained`)
+initialises the plastic readout from a supervised fit on that seed's Kenyon-cell
+training presentation vectors (`learning.pretrain`) and then runs the same
+dopamine-gated training and evaluation. If the readout *can* carry the
+Kenyon-cell signal, this condition should exceed the trained condition.
+
+**Separable-task control.** A second configuration
+(`configs/odor-separable.yaml`) sets the cross-category receptor overlap to zero
+(`encoding.odor.active_elsewhere: 0`), making the classes separable by a trivial
+linear readout of the stimulus. If the null were caused by task difficulty, this
+task should learn.
+
 Protocol: seeded 15/5 per-category train/test split; 600 training trials per
-seed; the trained condition plus five controls (untrained, shuffled training
-labels, dopamine off, structural plasticity on, structural plasticity off).
+seed; the trained condition plus controls (untrained, shuffled training labels,
+dopamine off, structural plasticity on/off, and supervised pretraining).
 Significance is a one-sample *t*-test and a Wilcoxon signed-rank test against
 chance 0.25 at α = 0.01, with 95 % percentile-bootstrap CIs over seeds. The
-formal run uses 10 seeds (1000–1009) with `eval_repeats = 3`.
+formal runs use 10 seeds (1000–1009) with `eval_repeats = 3`.
 
 ### 3.5 Reproducibility
 
@@ -265,11 +297,73 @@ structural-on condition (0.252) is not distinguishable from structural-off
 (0.253) or from the trained condition (0.262), and none exceeds chance. Growth
 changes the network but not the class information available to the readout.
 
+### 4.4 Positive controls: the Kenyon-cell code does not carry the label
+
+Two additional 10-seed runs (`runs/pctrl-v1-merged` on the default task,
+`runs/pctrl-sep-merged` on the separable task) add the representation probes,
+the supervised-pretrained condition, and the separable-task control.
+
+**Probes.** The input stage decodes the category perfectly — held-out 1.000 on
+every seed in both tasks — so the stimulus genuinely reaches the network with
+its class structure intact, and the probe instrument works (Table 5). The
+Kenyon-cell population, by contrast, decodes at chance in both tasks (0.255 and
+0.227), despite a training accuracy of 1.000: the decoder memorises the training
+presentations but has no class structure to generalise. The k-fold
+cross-validation accuracy (0.236 / 0.228) confirms the estimate is not an
+artefact of the held-out split. The positive-control gate therefore **fails** in
+both runs with the same diagnosis: *the label signal is lost before the plastic
+readout*.
+
+**Table 5.** Representation probes, 10 seeds, chance 0.25, held-out accuracy on
+unseen words.
+
+| task | stage | features | train | CV | held-out | 95 % CI |
+|---|---|---|---|---|---|---|
+| default | input (olfactory) | 673 | 1.000 | 1.000 | **1.000** | [1.000, 1.000] |
+| default | Kenyon cell | 384 | 1.000 | 0.236 | **0.255** | [0.227, 0.287] |
+| separable | input (olfactory) | 673 | 1.000 | 1.000 | **1.000** | [1.000, 1.000] |
+| separable | Kenyon cell | 384 | 1.000 | 0.228 | **0.227** | [0.195, 0.262] |
+
+**Supervised pretraining does not help.** The `trained_pretrained` condition
+fits the readout to a training accuracy of 1.000 on every seed, yet its
+held-out accuracy is 0.268 (default task) and 0.235 (separable task) — equal to
+or below the plain trained condition (0.262 / 0.248) and at chance (Table 6).
+The bottleneck is not the readout's capacity or initialisation.
+
+**Table 6.** Held-out accuracy by condition for the two positive-control runs
+(10 seeds, chance 0.25). *p* is a one-sided test against chance; none reach
+significance at α = 0.01.
+
+| run | condition | mean acc | 95 % CI | *p* |
+|---|---|---|---|---|
+| default | untrained | 0.227 | [0.195, 0.262] | 0.8850 |
+| default | **trained** | **0.262** | [0.237, 0.287] | 0.2069 |
+| default | shuffled labels | 0.258 | [0.233, 0.282] | 0.2683 |
+| default | dopamine off | 0.245 | [0.205, 0.285] | 0.5887 |
+| default | trained + pretrain | 0.268 | [0.223, 0.312] | 0.2301 |
+| default | structural on | 0.235 | [0.195, 0.277] | 0.7450 |
+| default | structural off | 0.248 | [0.212, 0.282] | 0.5343 |
+| separable | untrained | 0.235 | [0.203, 0.268] | 0.7940 |
+| separable | **trained** | **0.248** | [0.207, 0.285] | 0.5308 |
+| separable | trained + pretrain | 0.235 | [0.207, 0.268] | 0.8058 |
+| separable | dopamine off | 0.247 | [0.215, 0.287] | 0.5659 |
+
+**Not task difficulty.** On the separable task the stimulus is decodable by a
+trivial linear rule (probe 1.000), the untrained and trained conditions sit at
+chance, and the gate fails for the same reason as the default task. The null is
+therefore not caused by overlapping categories.
+
+Across both tasks the probes show the encoding, the instrument, and the readout
+as fitted are sound; the only point at which class information is lost is the
+transform from the input (where the probe scores 1.000) to the Kenyon-cell
+population (where it scores at chance).
+
 ## 5. Discussion
 
 ### 5.1 Where the signal is lost
 
-Three observations localise the failure.
+Three observations localise the failure, and the positive controls add a
+fourth, decisive one.
 
 1. **Not the output drive.** In the trained condition the MBON stage is not
    silent (no-response 0.257; 0.000 in the dopamine-off control), so the
@@ -279,16 +373,24 @@ Three observations localise the failure.
    (category-conditioned prototypes with partial overlap), and it reaches the
    output stage; the visual encoding's failure was traced upstream of the
    readout, and the olfactory route removes the synthetic bridge entirely.
-3. **The plastic readout / credit rule.** The mean dopamine signal is strongly
-   negative during training (≈ −0.5), because with the readout near chance,
-   ≈75 % of trials are "wrong" and the per-class credit rule punishes the
-   weights on most trials. The trained weights therefore drift toward a label
-   prior rather than a category code, exactly the signature of the
-   near-uniform confusion matrix.
+3. **Not the plastic readout or its credit rule.** The input-stage probe
+   reaches 1.000 held-out, so the decoder instrument and the fitted readout can
+   in principle express the label. A supervised-pretrained readout that fits
+   the Kenyon-cell features to 1.000 still generalises at chance, and the
+   separable-task control — decodable by a trivial linear rule — is equally
+   null. The readout is not the first place the signal dies.
+4. **The Kenyon-cell representation.** On both tasks the Kenyon-cell probe
+   scores at chance (held-out 0.255 / 0.227, CV ≈ 0.23) while the input probe
+   scores 1.000. The `ALPN → Kenyon cell` transform is the point at which
+   class information is lost; everything downstream — decoder, pretraining,
+   dopamine rule — has no class code to amplify.
 
-Taken together, these point at the dopamine-gated `mushroom body → output`
-projection and its credit rule, under this calibrated regime, as the
-bottleneck — not the stimulus or the missing optic-lobe route.
+Taken together, these localise the failure to the `ALPN → Kenyon cell`
+projection under this calibrated regime: the stimulus encodes the label (input
+probe 1.000), the readout is a valid instrument (it memorises and could decode),
+but the Kenyon-cell population does not linearly carry the category. The
+three-factor rule and credit assignment are exonerated as the *first* cause;
+they inherit a code with nothing to learn.
 
 ### 5.2 A wiring caveat
 
@@ -319,14 +421,22 @@ exercise those edges; that is a separate experiment.
 
 ### 5.4 What would change the answer
 
-- A reward-prediction-error baseline for the per-class credit rule, so that
-  mean dopamine is not dominated by the ~75 % wrong-at-chance surplus.
-- Simulating the real `DAN → mushroom body` edges by stage reordering.
-- A supervised-pretraining initialisation of the plastic readout
-  (`learning.pretrain`, implemented but off by default) to test whether the
-  readout *can* carry the Kenyon-cell signal before blaming the rule.
+The probe evidence moves the target from the readout to the representation.
+Candidates that could change the answer include:
 
-Each of these attacks the readout/credit-rule bottleneck; adding seeds will
+- **Improving the `ALPN → Kenyon cell` code.** The probes show the class
+  signal is lost at this transform, so a biologically motivated recoding —
+  denser or sparser Kenyon-cell representations, different input scaling,
+  non-linear decoding of the KC population — is the direct next experiment.
+- **A reward-prediction-error baseline for the per-class credit rule.** The
+  mean dopamine signal is dominated by the ≈75 % wrong-at-chance surplus;
+  while the current results show the readout inherits a code with no class
+  signal, an RPE rule would still be the principled way to learn if a code were
+  present.
+- **Simulating the real `DAN → mushroom body` edges** by stage reordering, so
+  the teacher flows through real synapses rather than a global scalar.
+
+Each of these targets a different stage than the readout; adding seeds will
 not, since the formal 10-seed result already excludes under-powering.
 
 ## 6. Conclusion
@@ -337,19 +447,27 @@ words: across 10 seeds it reached 0.262 (95 % CI [0.237, 0.287]) against chance
 0.25 (*p* = 0.21), with every control also at chance. A prior visual
 formulation failed for a stronger reason — the optic-lobe → mushroom-body
 pathway does not exist in the connectome — which motivated the olfactory pivot.
-The negative result is reproducible end to end on a laptop, and the archived
-run and manifests are released with the code. We report it without reframing:
-the connectome provides a beautifully structured circuit, but this plasticity
-rule and credit assignment do not, on their own, turn that structure into a
-learned word-class code.
+Positive controls turned the residual null into a precise statement: the
+category is decodable at the stimulus (input probe 1.000), a supervised decoder
+memorises the Kenyon-cell presentations perfectly, and yet the Kenyon-cell
+population carries no generalisable class code (probe 0.255) and supervised
+pretraining can not recover one — on either an overlapping task or a trivially
+separable one. The plasticity rule and the readout are exonerated as the first
+cause: the *`ALPN → Kenyon cell` transform* is where the label is lost. The
+negative result is reproducible end to end on a laptop, and the archived runs
+and manifests are released with the code. We report it without reframing: the
+connectome provides a beautifully structured circuit, but under this calibrated
+regime the Kenyon-cell population does not turn its input into a code a linear
+readout, a supervised decoder, or this plasticity rule can learn from.
 
 ## Data and code availability
 
 Code: `ngiaved/fly-word-categorization` (MIT-style project layout; FlyWire data
 is CC-BY-NC and downloaded by `flyread fetch-data`). The formal run is archived
-under `runs/odor-v1-merged/` (report, results JSON, manifest, figures). The
-visual 2-seed run is `runs/run-20261008T204756Z/`; the reduced olfactory
-diagnostic is `runs/run-20261009T095645Z/`.
+under `runs/odor-v1-merged/` (report, results JSON, manifest, figures), and the
+positive-control runs under `runs/pctrl-v1-merged/` and
+`runs/pctrl-sep-merged/`. The visual 2-seed run is `runs/run-20261008T204756Z/`;
+the reduced olfactory diagnostic is `runs/run-20261009T095645Z/`.
 
 ## References
 
@@ -384,7 +502,9 @@ verified against the primary sources before submission.*
 python -m pip install -r requirements.lock.txt
 python -m pip install -e .
 python -m flyread fetch-data
-python -m flyread sweep        # 10 seeds in parallel, then merge into runs/odor-v1-merged
+python -m flyread sweep        # default: 10 seeds in parallel, then merge into runs/odor-v1-merged
+python -m flyread --config configs/default.yaml --run-id pctrl-v1 sweep   # + probes, pretrained, gate
+python -m flyread --config configs/odor-separable.yaml --run-id pctrl-sep sweep  # separable-task control
 ```
 
 The `sweep` command runs one `evaluate` process per seed, resumes completed
