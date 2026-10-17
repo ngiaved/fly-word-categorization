@@ -1,0 +1,28 @@
+# Odor recode: raise the ALPN -> Kenyon-cell gain so the label signal survives
+# the ALPN -> KC transform.
+#
+# Motivation (positive-control pre-screen, untrained network, 10 seeds): at the
+# default calibrated operating point the input probe is perfect (1.00) but the
+# Kenyon-cell probe is at chance (CV ~0.24, held-out ~0.25), i.e. the class
+# signal is destroyed in the ALPN -> KC transform -- the "upstream bottleneck"
+# the gate reports. Raising only this pair's gain restores it monotonically
+# (gain 10 -> KC CV 0.54, gain 20 -> 0.51..0.97 depending on the accepted
+# scale, gain 50 -> ~0.99). Growing the brain instead (KC cap 384 -> 1024) and
+# denser ALPN codes (active_from_own 64 -> 160) do nothing, and a non-linear
+# (MLP) probe of the baseline KC code is also at chance, so the information is
+# genuinely absent rather than linearly hidden.
+#
+# Calibration's single global weight scale otherwise lowers the scale as the
+# gain rises, holding KC activity ~constant and nullifying the gain. Widening
+# `max_mean_rate_hz` lets calibration accept the hotter Kenyon-cell regime in
+# which the code is decodable. This deliberately departs from the 0.5-15 Hz
+# physiological band used by the default config; it is a recode experiment, not
+# a new baseline.
+network:
+  pair_gain:
+    mushroom_body>output: 10.0
+    olfactory>mushroom_body: 20.0
+calibration:
+  # Default is 15 Hz. Widened so calibration may accept a scale at which the
+  # Kenyon cells carry the label (see module rationale above).
+  max_mean_rate_hz: 100.0

@@ -357,6 +357,81 @@ regime, so the readout has nothing to amplify.
    structural-growth machinery are implemented, tested, and behave as designed;
    the negative result is about the signal path, not those mechanisms.
 
+### Recode follow-up: decoder-fit leakage and the harness fix
+
+To test the upstream-bottleneck diagnosis, the `ALPN → Kenyon cell` transform
+was re-encoded (`configs/odor-recode.yaml`: `olfactory → mushroom_body` gain 20,
+`mushroom_body → output` gain 10, calibration ceiling 100 Hz). Run
+`runs/recode-v1-merged` (10 seeds) lifts the Kenyon-cell probe from 0.255 to
+**0.933** — the positive-control gate now **passes** — and reports trained
+accuracy **0.363** (p = 0.0013). But the shuffled-labels control scored **0.615**,
+which raised the harness data-leakage warning and invalidated the run.
+
+**Confound.** `evaluate.run_condition` fit the supervised linear decoder on the
+dataset (true) labels in *every* condition, including `shuffled_labels`. The
+control therefore had a classifier reading the true labels off the network's
+training outputs, i.e. a mapping the network was never taught. The correct
+protocol — stated in the config comments and the paper — is to fit the decoder
+on the labels each training trial was actually **presented** with
+(`labels_for_training`, shuffled where shuffled).
+
+**Fix.** The decoder fit now uses the presented labels. This is a no-op for every
+non-shuffled condition (there the presented labels *are* the dataset labels), so
+all other `recode-v1` numbers stand; only the `shuffled_labels` row was invalid.
+A regression test (`test_decoder_is_fit_on_presented_labels_not_dataset_labels`)
+reproduces the leak and guards it, and the smoke pipeline now puts the shuffled
+control at exactly chance (0.250, no warning).
+
+**Residual floor and the leakage margin.** Under the fixed harness `recode-v2`
+puts the shuffled control at **0.330**, down from 0.615 but still above the raw
+chance level. Crucially it is indistinguishable from the untrained network
+(**0.338**), which is the point: the recode lifts the *representation's own*
+decodability (the Kenyon-cell probe reaches 0.958), so even a no-learning network
+sits above chance and the shuffled control inherits that floor. The leakage check
+now compares the shuffled control against the higher of chance and the untrained
+floor (`evaluate.aggregate`), not chance alone, so a generically decodable
+representation no longer reads as leakage. A new `shuffled_labels_no_growth`
+condition answers the remaining question — whether structural recruitment, whose
+category guidance uses the network's own predictions, contributes any of it — in
+the negative: with growth switched off the shuffled control falls to or below
+chance (**0.230** at gain 20, **0.233** at gain 50; Shannon chance 0.25;
+`runs/recode-v2-extra-merged`, `runs/recode-50-extra-merged`; no warning).
+
+**Mechanism isolation.** `recode-v1` also showed that accuracy tracks *structural
+growth*, not dopamine: `dopamine_off` (growth on) 0.597 and `structural_on` 0.618
+both far exceed `trained` (growth off) 0.363, while the Kenyon-cell probe is high
+regardless. A new condition `dopamine_off_no_growth` completes the dopamine ×
+growth 2×2 so each mechanism can be read off against its own control.
+
+**Results.** Both fixed-harness runs are complete — `recode-v2-merged` (gain 20,
+`configs/odor-recode.yaml`) and `recode-50-v2-merged` (gain 50,
+`configs/odor-recode-50.yaml`), 10 seeds each. Both pass the positive-control gate
+(input probe 1.000; Kenyon-cell probe **0.950** at gain 20, **1.000** at gain 50)
+and carry no leakage warning under the untrained-relative check. Held-out accuracy
+(mean, chance 0.25):
+
+| condition | gain 20 | gain 50 |
+| --- | --- | --- |
+| untrained | 0.338 | 0.330 |
+| trained | **0.363** | **0.418** |
+| shuffled_labels | 0.330 | 0.245 |
+| shuffled_labels_no_growth | 0.230 | 0.233 |
+| dopamine_off | 0.597 | 0.785 |
+| dopamine_off_no_growth | 0.357 | 0.387 |
+| trained_pretrained | 0.512 | 0.340 |
+| structural_on | **0.608** | **0.833** |
+| structural_off | 0.370 | 0.435 |
+
+The recode is not marginal: at gain 50 `structural_on` reaches **0.833** and
+`dopamine_off` **0.785**, and every growth-on condition improves over its gain-20
+value. Accuracy scales with how much structural recruitment a condition permits —
+with growth off (`trained`, `structural_off`, `dopamine_off_no_growth`) it
+collapses toward the untrained floor, while `structural_on` sits far above
+`structural_off` (0.608 vs 0.370; 0.833 vs 0.435). The shuffled control stays at or
+below the untrained floor (0.330 / 0.245 vs 0.338 / 0.330) and is not significant,
+and the no-growth isolation control is at/below chance, so the residual is
+structural, not label leakage. The `recode-v1` shuffled row is superseded.
+
 ---
 
 ## Interpretation
@@ -373,15 +448,22 @@ same instrument. The bottleneck is therefore the **`ALPN → Kenyon cell`
 transform** — the code the readout would have to amplify does not linearly
 carry the label — not the input encoding, the missing optic-lobe route, the
 plastic `mushroom body → output` readout, or its credit rule. This is reported
-as a negative result without reframing, as the evaluation spec requires.
+as a negative result without reframing, as the evaluation spec requires. The
+recode follow-up above shows the diagnosis is actionable: raising the transform's
+gain makes the same harness learn (`structural_on` **0.833** at gain 50),
+confirming the bottleneck was the transform rather than the readout or its credit
+rule.
 
 ## What would need to change to revisit it
 
-- **Recode the `ALPN → Kenyon cell` stage.** The probes put the failure here:
-  the stimulus decodes at 1.000 and the readout is a working instrument, but
-  the Kenyon-cell population does not carry the class. Denser or sparser
-  Kenyon-cell representations, input scaling, or non-linear decoding are the
-  direct experiments.
+- **Recode the `ALPN → Kenyon cell` stage — now tested and positive.** The probes
+  put the failure here: the stimulus decodes at 1.000 and the readout is a working
+  instrument, but the Kenyon-cell population does not carry the class. Raising the
+  transform's gain (and the readout gain) does make the network learn — see the
+  recode follow-up above (`runs/recode-50-v2-merged`: `structural_on` 0.833,
+  `dopamine_off` 0.785, Kenyon-cell probe 1.000, no leakage warning). Denser or
+  sparser Kenyon-cell representations, input scaling, and non-linear decoding
+  remain open variants to sweep.
 - **A reward-prediction-error baseline** for the per-class credit rule, so mean
   dopamine is not dominated by the ≈75 % wrong-at-chance surplus (relevant once
   a class code exists to learn).
@@ -420,4 +502,7 @@ checksums, annotation rules, calibration attempts, codegen target, hardware,
 git commit). The visual 2-seed run is `runs/run-20261008T204756Z/`; the odor
 reduced diagnostic is `runs/run-20261009T095645Z/`; the formal odor run is
 `runs/odor-v1-merged/`; the positive-control runs are `runs/pctrl-v1-merged/`
-and `runs/pctrl-sep-merged/`.
+and `runs/pctrl-sep-merged/`. The recode follow-up runs
+are `runs/recode-v2-merged` (gain 20) and `runs/recode-50-v2-merged` (gain 50),
+with the `shuffled_labels_no_growth` isolation controls in
+`runs/recode-v2-extra-merged` and `runs/recode-50-extra-merged`.

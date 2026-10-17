@@ -1,0 +1,16 @@
+# Odor recode, stronger: ALPN -> Kenyon-cell gain 50.
+#
+# Same rationale as configs/odor-recode.yaml; this is the stronger of the two
+# recode points. On the untrained-network probe (10 seeds, widened calibration
+# band) gain 50 makes the Kenyon-cell code near-perfectly decodable (KC CV
+# ~0.99, held-out ~0.98, MLP ~0.87), versus KC CV ~0.51 for gain 20 and ~0.24
+# for the default config. Run as a comparison against recode-v1 to see whether
+# a stronger upstream signal changes the behavioural outcome.
+network:
+  pair_gain:
+    mushroom_body>output: 10.0
+    olfactory>mushroom_body: 50.0
+calibration:
+  # Default is 15 Hz; widened as in odor-recode.yaml so calibration may accept
+  # a scale at which the Kenyon cells carry the label.
+  max_mean_rate_hz: 100.0
