@@ -340,6 +340,11 @@ network:
     # Higher gains only saturate the raw counts; 10 is the smallest value that
     # wakes the real KC -> MBON readout out of its silent floor.
     mushroom_body>output: 10.0
+    # Gain on the real ALPN -> Kenyon-cell edge.1.0 is the identity (the
+    # calibrated baseline); the recode experiments sweep it to test whether the
+    # ALPN-to-KC transform, not the plastic readout, is what destroys the label
+    # signal. Applied generically by network.build_network (key "<pre>><post>").
+    olfactory>mushroom_body: 1.0
   # How raw synapse counts become synaptic weights. Raw counts are not
   # comparable across stage pairs: mushroom_body -> reinforcement averages 29
   # synapses per edge, reinforcement -> mushroom_body averages 0.5, so that
@@ -637,6 +642,8 @@ evaluation:
     - trained
     - shuffled_labels
     - dopamine_off
+    # Dopamine x growth isolation: dopamine off AND growth off.
+    - dopamine_off_no_growth
     # Positive control: same pipeline, but the plastic readout is initialised
     # with supervised logistic-regression weights before dopamine fine-tuning.
     # Answers "can the readout express the class signal at all?".
@@ -680,7 +687,9 @@ evaluation:
   curve_window_trials: 50
   # Held-out evaluation repetitions per word, to reduce response noise.
   eval_repeats: 3
-  # Raise a data-leakage warning when shuffled labels beat chance by this much.
+  # Raise a data-leakage warning when shuffled labels beat the higher of
+  # chance and the untrained-network floor by this much. The floor guards
+  # against flagging a representation that is decodable without any learning.
   leakage_margin: 0.05
   # Positive-control probes: linear decodability of the label from the input
   # stage and from the Kenyon-cell representation, on the fixed untrained

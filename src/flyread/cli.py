@@ -295,6 +295,30 @@ def cmd_train(args, config: Config) -> int:
     return 0
 
 
+def _load_checkpoint(path: Path) -> dict[tuple[int, str], dict]:
+    """Read the per-(seed, condition) checkpoint written during a run.
+
+    Returns an empty mapping when the checkpoint does not exist. Later lines
+    win for a repeated (seed, condition); the runs are deterministic, so
+    duplicates are identical.
+    """
+    import json as _json
+
+    completed: dict[tuple[int, str], dict] = {}
+    if not path.exists():
+        return completed
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        completed[(int(payload["seed"]), str(payload["condition"]))] = payload
+    return completed
+
+
 def cmd_evaluate(args, config: Config) -> int:
     """Run every condition over every seed and write the report."""
     import brian2 as b2
@@ -303,6 +327,7 @@ def cmd_evaluate(args, config: Config) -> int:
         aggregate,
         confusion_matrix_total,
         make_split,
+        pick_confusion_condition,
         representation_probes,
         run_condition,
     )
@@ -347,6 +372,12 @@ def cmd_evaluate(args, config: Config) -> int:
     # completed (seed, condition) accuracy on disk, and the live log shows
     # numbers instead of only "starting condition X" lines.
     checkpoint = run_dir / "seed_conditions.jsonl"
+    resumed = _load_checkpoint(checkpoint)
+    if resumed:
+        LOGGER.info(
+            "resuming from checkpoint %s: %d completed (seed, condition) pairs",
+            checkpoint, len(resumed),
+        )
     for index, run_seed in enumerate(seeds, start=1):
         seed_everything(run_seed)
         split = make_split(
@@ -357,6 +388,18 @@ def cmd_evaluate(args, config: Config) -> int:
         )
         per_condition = {}
         for condition in conditions:
+            cached = resumed.get((run_seed, condition))
+            if cached is not None:
+                from .evaluate import RunResult
+
+                per_condition[condition] = RunResult.from_dict(cached)
+                LOGGER.info(
+                    "[%d/%d] seed %d condition %-14s resumed from checkpoint "
+                    "(test acc %.3f)",
+                    index, n_seeds, run_seed, condition,
+                    per_condition[condition].test_accuracy,
+                )
+                continue
             LOGGER.info("[%d/%d] seed %d condition %s", index, n_seeds, run_seed, condition)
             per_condition[condition] = run_condition(
                 condition, dataset, split, run_seed, run_config, weight_scale,
@@ -415,8 +458,9 @@ def cmd_evaluate(args, config: Config) -> int:
         },
     )
 
+    confusion_condition = pick_confusion_condition(all_results, conditions)
     confusion = confusion_matrix_total(
-        all_results, "trained", len(dataset.categories)
+        all_results, confusion_condition, len(dataset.categories)
     )
     manifest.metrics = {
         "conditions": report.conditions,
@@ -569,7 +613,7 @@ def _load_seed_results(payload: dict[str, Any], n_categories: int):
 
 def merge_runs(config: Config, run_ids: Sequence[str], out_run_id: str) -> int:
     """Aggregate already-completed runs/<run_id> outputs into one report."""
-    from .evaluate import aggregate, confusion_matrix_total
+    from .evaluate import aggregate, confusion_matrix_total, pick_confusion_condition
     from .report import (
         build_markdown,
         plot_confusion,
@@ -630,7 +674,11 @@ def merge_runs(config: Config, run_ids: Sequence[str], out_run_id: str) -> int:
     }
 
     report = aggregate(seed_results, dataset, config, metadata=metadata)
-    confusion = confusion_matrix_total(seed_results, "trained", n_categories)
+    confusion = confusion_matrix_total(
+        seed_results,
+        pick_confusion_condition(seed_results, list(config.get("evaluation.conditions"))),
+        n_categories,
+    )
     out_dir = _run_dir_for(config, out_run_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 

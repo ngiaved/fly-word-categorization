@@ -189,6 +189,178 @@ def test_shuffled_labels_at_chance_raises_no_warning():
     assert report.leakage_warning is None
 
 
+def test_shuffled_labels_above_chance_but_at_untrained_floor_raises_no_warning():
+    # The recode raises the representation's own decodability: the untrained
+    # network already decodes the label above chance. The shuffled control may
+    # sit above chance for the same reason without leaking anything, so the
+    # warning must compare against the untrained floor, not chance alone.
+    cfg, dataset = _dataset()
+
+    def acc(condition, offset):
+        if condition == "shuffled_labels":
+            return 0.33
+        if condition == "untrained":
+            return 0.34
+        return 0.30
+
+    report = evaluate.aggregate(
+        _seed_results(acc), dataset, cfg, metadata={"base_seed": 1000}
+    )
+    assert report.leakage_warning is None
+
+
+def test_shuffled_labels_above_untrained_floor_raises_leakage_warning():
+    cfg, dataset = _dataset()
+
+    def acc(condition, offset):
+        if condition == "shuffled_labels":
+            return 0.55
+        if condition == "untrained":
+            return 0.30
+        return 0.30
+
+    report = evaluate.aggregate(
+        _seed_results(acc), dataset, cfg, metadata={"base_seed": 1000}
+    )
+    assert report.leakage_warning is not None
+    assert "untrained" in report.leakage_warning
+
+
+def test_decoder_is_fit_on_presented_labels_not_dataset_labels(monkeypatch):
+    # Regression: the supervised linear decoder must be fit on the labels each
+    # training trial was PRESENTED with. Fitting on the dataset labels made the
+    # shuffled-labels control recover a mapping the network was never taught,
+    # which is what produced the spurious 0.615 "leakage" score.
+    from flyread import learning, network as net_mod, structural as structural_mod
+
+    cfg = config.Config.load("configs/smoke.yaml")
+
+    n_classes = 4
+    label_of = {}
+    train_items, test_items = [], []
+    for label in range(n_classes):
+        for k in range(8):
+            word = f"t-{label}-{k}"
+            label_of[word] = label
+            train_items.append(encoding.WordItem(word, str(label), label))
+        for k in range(4):
+            word = f"e-{label}-{k}"
+            label_of[word] = label
+            test_items.append(encoding.WordItem(word, str(label), label))
+
+    dataset = encoding.Dataset(
+        items=train_items + test_items,
+        categories=[str(i) for i in range(n_classes)],
+        path="synthetic",
+        sha256="0",
+    )
+    split = evaluate.Split(train=list(train_items), test=list(test_items), seed=1000)
+
+    def feature(word):
+        vec = np.zeros(n_classes, dtype=np.float64)
+        vec[label_of[word]] = 1.0
+        return vec
+
+    class _Record:
+        def __init__(self, word):
+            self.spike_counts = feature(word)
+            self.predicted = 0
+            self.reward_type = "reward"
+            self.correct = False
+            self.no_response = False
+            self.dopamine = 0.0
+            self.trial = 0
+
+    class _Stats:
+        def as_dict(self):
+            return {}
+
+    class _FakeRunner:
+        def __init__(self, *args, **kwargs):
+            self.last_stimulus_rates = {}
+            self.training_history = []
+            self.history = []
+            self.stats = _Stats()
+
+        def run_trial(self, word, label, step, learn=True):
+            return _Record(word)
+
+        def accuracy(self, since=0):
+            return 0.0
+
+        def learning_curve(self, window, history=None):
+            return []
+
+    class _FakeStructural:
+        def __init__(self, *args, **kwargs):
+            self.events = []
+
+        def set_trial_duration(self, *args, **kwargs):
+            pass
+
+        def observe_trial(self, *args, **kwargs):
+            pass
+
+        def observe(self, *args, **kwargs):
+            pass
+
+        def maybe_step(self, *args, **kwargs):
+            pass
+
+        def summary(self):
+            return {}
+
+    # Nearest-centroid decoder: generalises from the fit labels, so a correct
+    # label mapping yields perfect held-out accuracy and a shuffled one does
+    # not. Reading dataset labels on the shuffled run would restore perfection.
+    def fake_fit(features, labels, n, run_config):
+        x = np.asarray(features, dtype=np.float64)
+        y = np.asarray(labels, dtype=np.int64)
+        return {
+            "centroids": np.stack(
+                [x[y == c].mean(axis=0) if np.any(y == c) else np.zeros(x.shape[1])
+                 for c in range(n)]
+            )
+        }
+
+    def fake_predict(features, decoder):
+        x = np.asarray(features, dtype=np.float64)
+        c = decoder["centroids"]
+        return ((x[:, None, :] - c[None, :, :]) ** 2).sum(axis=2).argmin(axis=1)
+
+    class _FakeRng:
+        def __init__(self, reverse):
+            self.reverse = reverse
+
+        def permutation(self, n):
+            indices = np.arange(n)
+            return indices[::-1] if self.reverse else indices
+
+    def fake_make_rng(seed, stream, **kwargs):
+        return _FakeRng(reverse=(stream == "shuffled-labels"))
+
+    monkeypatch.setattr(evaluate, "TrialRunner", _FakeRunner)
+    monkeypatch.setattr(evaluate, "make_mapping", lambda *a, **k: object())
+    monkeypatch.setattr(evaluate, "make_rng", fake_make_rng)
+    monkeypatch.setattr(net_mod, "build_network", lambda *a, **k: object())
+    monkeypatch.setattr(structural_mod, "StructuralPlasticity", _FakeStructural)
+    monkeypatch.setattr(learning, "fit_readout_decoder", fake_fit)
+    monkeypatch.setattr(learning, "decoder_predict", fake_predict)
+
+    class _Subcircuit:
+        roles = {"input": [0, 1, 2, 3]}
+
+    trained = evaluate.run_condition(
+        "trained", dataset, split, 1000, cfg, 1.0, _Subcircuit()
+    )
+    shuffled = evaluate.run_condition(
+        "shuffled_labels", dataset, split, 1000, cfg, 1.0, _Subcircuit()
+    )
+
+    assert trained.test_accuracy > 0.9
+    assert shuffled.test_accuracy < 0.5
+
+
 def test_confusion_matrix_is_four_by_four_with_recall():
     # Requirement: Confusion matrix and no-response rate
     matrix = evaluate.ConfusionMatrix(
@@ -205,6 +377,84 @@ def test_confusion_matrix_is_four_by_four_with_recall():
     )
     assert total.counts.shape == (4, 4)
     assert total.counts.sum() == 0, "synthetic runs have no held-out records"
+
+
+def _seed_results_with(conditions):
+    confusion = evaluate.ConfusionMatrix(
+        labels=[0, 1, 2, 3], counts=np.zeros((4, 4), dtype=np.int64)
+    )
+    return [
+        evaluate.SeedResult(
+            seed=1000 + offset,
+            results={
+                condition: _result(condition, 1000 + offset, 0.3, confusion)
+                for condition in conditions
+            },
+            weight_scale=0.05,
+            seconds=1.0,
+        )
+        for offset in range(2)
+    ]
+
+
+def test_pick_confusion_condition_prefers_trained_when_present():
+    seed_results = _seed_results_with(["untrained", "trained", "structural_on"])
+    chosen = evaluate.pick_confusion_condition(
+        seed_results, ["untrained", "trained", "structural_on"]
+    )
+    assert chosen == "trained"
+
+
+def test_pick_confusion_condition_falls_back_for_single_condition_run():
+    # Requirement: isolation controls run one condition and omit 'trained'.
+    conditions = ["shuffled_labels_no_growth"]
+    seed_results = _seed_results_with(conditions)
+    chosen = evaluate.pick_confusion_condition(seed_results, conditions)
+    assert chosen == "shuffled_labels_no_growth"
+
+
+def test_pick_confusion_condition_raises_when_nothing_ran():
+    seed_results = _seed_results_with([])
+    try:
+        evaluate.pick_confusion_condition(seed_results, ["trained"])
+    except evaluate.EvaluationError as error:
+        assert "any condition" in str(error)
+    else:
+        raise AssertionError("an empty run must be rejected")
+
+
+def test_run_result_round_trips_through_checkpoint_dict():
+    # Requirement: resume a killed run from seed_conditions.jsonl
+    confusion = evaluate.ConfusionMatrix(
+        labels=[0, 1, 2, 3],
+        counts=np.array([[3, 1, 0, 0], [0, 4, 0, 0], [1, 0, 3, 0], [0, 0, 1, 2]]),
+    )
+    original = _result("shuffled_labels_no_growth", 1002, 0.31, confusion)
+    payload = original.as_dict(include_records=False)
+    restored = evaluate.RunResult.from_dict(payload)
+    assert restored.condition == original.condition
+    assert restored.seed == original.seed
+    assert restored.trained == original.trained
+    assert abs(restored.test_accuracy - original.test_accuracy) < 1e-12
+    assert abs(restored.train_accuracy - original.train_accuracy) < 1e-12
+    assert restored.learning_curve == original.learning_curve
+    assert np.array_equal(restored.confusion.counts, original.confusion.counts)
+
+
+def test_load_checkpoint_ignores_blank_and_duplicate_lines(tmp_path):
+    from flyread import cli
+
+    path = tmp_path / "seed_conditions.jsonl"
+    path.write_text(
+        '{"seed": 1002, "condition": "untrained", "test_accuracy": 0.2}\n'
+        "\n"
+        '{"seed": 1002, "condition": "untrained", "test_accuracy": 0.217}\n'
+        '{"seed": 1003, "condition": "trained", "test_accuracy": 0.3}\n'
+    )
+    completed = cli._load_checkpoint(path)
+    assert completed[(1002, "untrained")]["test_accuracy"] == 0.217
+    assert (1003, "trained") in completed
+    assert cli._load_checkpoint(tmp_path / "missing.jsonl") == {}
 
 
 def test_learning_curve_is_recorded_per_window():

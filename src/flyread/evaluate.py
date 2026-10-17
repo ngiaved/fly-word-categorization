@@ -31,7 +31,23 @@ CONDITIONS: dict[str, dict[str, Any]] = {
     # fell back to the config's structural.enabled, making them identical).
     "trained": {"trained": True, "structural": False},
     "shuffled_labels": {"trained": True, "shuffle_labels": True},
+    # Isolation control: shuffled labels AND growth off. If the shuffled
+    # control sits above the no-learning floor, comparing this against
+    # shuffled_labels (growth on) says whether structural recruitment, whose
+    # category guidance uses the network's own predictions, is responsible.
+    "shuffled_labels_no_growth": {
+        "trained": True,
+        "shuffle_labels": True,
+        "structural": False,
+    },
     "dopamine_off": {"trained": True, "dopamine": False},
+    # Completes the dopamine x growth 2x2: dopamine off AND growth off, the
+    # baseline against which both single ablations are read.
+    "dopamine_off_no_growth": {
+        "trained": True,
+        "dopamine": False,
+        "structural": False,
+    },
     "shuffled_pixels": {"trained": True, "shuffle_pixels": True},
     "structural_on": {"trained": True, "structural": True},
     "structural_off": {"trained": True, "structural": False},
@@ -362,6 +378,34 @@ class RunResult:
             ]
         return payload
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RunResult":
+        """Rebuild a result from its serialised form (see ``as_dict``).
+
+        Used to resume a run from the ``seed_conditions.jsonl`` checkpoint:
+        every completed (seed, condition) accuracy is replayed instead of being
+        recomputed. Per-trial ``records`` are not part of the checkpoint, so the
+        rebuilt result has an empty record list; the reported statistics do not
+        depend on the raw records.
+        """
+        counts = np.asarray(payload["confusion_matrix"], dtype=np.int64)
+        return cls(
+            condition=str(payload["condition"]),
+            seed=int(payload["seed"]),
+            trained=bool(payload["trained"]),
+            train_accuracy=float(payload["train_accuracy"]),
+            test_accuracy=float(payload["test_accuracy"]),
+            test_no_response_rate=float(payload["test_no_response_rate"]),
+            confusion=ConfusionMatrix(
+                labels=list(range(counts.shape[0])), counts=counts
+            ),
+            learning_curve=list(payload.get("learning_curve") or []),
+            plasticity=dict(payload.get("plasticity") or {}),
+            structural=payload.get("structural"),
+            records=[],
+            extra=dict(payload.get("extra") or {}),
+        )
+
 
 def condition_config(config, condition: str):
     """Config for one condition, with its ablation overrides applied."""
@@ -450,7 +494,7 @@ def run_condition(
         )
 
     train_vectors: list[Any] = []
-    train_true_labels: list[int] = []
+    train_fit_labels: list[int] = []
     if settings.get("trained"):
         for step in range(n_trials):
             position = int(order[step % len(order)])
@@ -458,7 +502,7 @@ def run_condition(
                 train_items[position].word, labels_for_training[position], step
             )
             train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
-            train_true_labels.append(train_items[position].label)
+            train_fit_labels.append(labels_for_training[position])
             # runner.run_trial snapshots per-stage rates during the stimulus
             # window; the live monitors are cleared for the rest period.
             structural.observe_trial(record.predicted, record.reward_type)
@@ -480,7 +524,7 @@ def run_condition(
         # vectors are identical to the tail of the training loop and the numbers
         # are unchanged.
         train_vectors = []
-        train_true_labels = []
+        train_fit_labels = []
         for exp in range(dec_window):
             position = int(order[exp % len(order)])
             rec = runner.run_trial(
@@ -490,7 +534,7 @@ def run_condition(
                 learn=False,
             )
             train_vectors.append(np.asarray(rec.spike_counts, dtype=np.float64))
-            train_true_labels.append(train_items[position].label)
+            train_fit_labels.append(labels_for_training[position])
     else:
         train_accuracy = float("nan")
         # The untrained control has no training loop, but the supervised readout
@@ -502,7 +546,7 @@ def run_condition(
                 item.word, item.label, 100_000 + index, learn=False
             )
             train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
-            train_true_labels.append(item.label)
+            train_fit_labels.append(item.label)
             structural.observe_trial(record.predicted, record.reward_type)
 
     # Held-out evaluation: words never presented during training.
@@ -525,7 +569,7 @@ def run_condition(
 
         dec_window = int(run_config.get("evaluation.decoder_window", 200))
         fit_features = np.asarray(train_vectors[-dec_window:], dtype=np.float64)
-        fit_labels = np.asarray(train_true_labels[-dec_window:], dtype=np.int64)
+        fit_labels = np.asarray(train_fit_labels[-dec_window:], dtype=np.int64)
         if len(np.unique(fit_labels)) >= 2:
             decoder = fit_readout_decoder(
                 fit_features, fit_labels, len(dataset.categories), run_config
@@ -895,8 +939,12 @@ def aggregate(
     """Aggregate per-seed results into the reported statistics.
 
     A data-leakage warning is raised when the shuffled-label control beats
-    chance by more than the configured margin, since that would mean the
-    evaluation pipeline itself leaks label information.
+    the higher of chance and the untrained-network floor by more than the
+    configured margin, since that would mean the evaluation pipeline itself
+    leaks label information. Comparing against the untrained floor matters
+    when the representation itself is decodable without any learning: an
+    untrained network can sit well above chance, and the shuffled control
+    should be no more decodable than that.
     """
     chance = float(config.get("evaluation.chance_level"))
     level = float(config.get("evaluation.significance_level"))
@@ -946,13 +994,25 @@ def aggregate(
 
     leakage_warning = None
     shuffled = per_seed.get("shuffled_labels")
-    if shuffled and float(np.mean(shuffled)) > chance + margin:
-        leakage_warning = (
-            f"shuffled-label control reached {np.mean(shuffled):.3f}, above the "
-            f"{chance:.2f} chance level by more than the configured margin "
-            f"{margin:.2f}; the evaluation pipeline may leak label information"
-        )
-        LOGGER.warning("%s", leakage_warning)
+    if shuffled:
+        shuffled_mean = float(np.mean(shuffled))
+        untrained = per_seed.get("untrained")
+        floor = chance
+        floor_label = f"{chance:.2f} chance level"
+        if untrained:
+            untrained_mean = float(np.mean(untrained))
+            floor = max(chance, untrained_mean)
+            floor_label = (
+                f"{chance:.2f} chance level and the {untrained_mean:.3f} "
+                f"untrained-network floor"
+            )
+        if shuffled_mean > floor + margin:
+            leakage_warning = (
+                f"shuffled-label control reached {shuffled_mean:.3f}, above the "
+                f"{floor_label} by more than the configured margin "
+                f"{margin:.2f}; the evaluation pipeline may leak label information"
+            )
+            LOGGER.warning("%s", leakage_warning)
 
     probes, positive_control = _aggregate_probes(seed_results, chance, config)
     if positive_control.get("passed") is False:
@@ -987,3 +1047,20 @@ def confusion_matrix_total(
     if not found:
         raise EvaluationError(f"no results for condition {condition!r}")
     return ConfusionMatrix(labels=list(range(n_categories)), counts=total)
+
+
+def pick_confusion_condition(
+    seed_results: Sequence[SeedResult], conditions: Sequence[str]
+) -> str:
+    """Choose a condition to render the aggregate confusion matrix for.
+
+    Prefers ``trained`` when it has results, otherwise the first requested
+    condition that does. Single-condition isolation controls (e.g. the
+    ``shuffled_labels_no_growth`` pass) do not include ``trained``, so the
+    matrix must fall back rather than crash.
+    """
+    available = {name for result in seed_results for name in result.results}
+    for candidate in ("trained", *conditions):
+        if candidate in available:
+            return candidate
+    raise EvaluationError("no results for any condition")
