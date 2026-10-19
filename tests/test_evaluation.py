@@ -75,6 +75,15 @@ def test_growth_matched_control_conditions_apply_their_overrides():
     assert rc.get("evaluation.readout") == "linear"
 
 
+def test_online_rpe_condition_enables_per_class_prediction_error():
+    cfg, _ = _dataset()
+
+    rc, _ = evaluate.condition_config(cfg, "online_rpe")
+    assert rc.get("structural.enabled") is False
+    assert rc.get("learning.credit_assignment") == "per_class"
+    assert rc.get("learning.rpe_per_class") is True
+
+
 def test_random_feature_builder_matches_recruit_dimension():
     # The capacity control must add exactly the configured number of extra
     # features and be deterministic per (condition, seed).

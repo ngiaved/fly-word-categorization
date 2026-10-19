@@ -539,6 +539,18 @@ learning:
   #               information the global scalar cannot express. Still gated by
   #               the real reinforcement-neuron spike gate (DAN for odor-v1).
   credit_assignment: per_class
+  # Reward-prediction-error gating of the per-class credit vector.
+  #
+  #   false : the per_class valence is applied at full magnitude (+/- reward).
+  #   true  : the whole valence vector is scaled by the absolute prediction
+  #           error |dopamine - expected|, where the expectation is the same
+  #           running average used by reward_baseline. Outcomes that match the
+  #           current expectation therefore produce little or no update, and
+  #           only surprising outcomes teach -- the RPE property the global
+  #           scalar route already has but the per_class route did not. The
+  #           direction (punish chosen / reward true) is preserved, so it stays
+  #           a perceptron-style correction rather than a sign flip.
+  rpe_per_class: false
   # Supervised readout pretraining. The three-factor rule alone does not beat
   # chance on this subcircuit because the Kenyon-cell drive to the readout is
   # weak and dominated by the spontaneous noise needed to make the LIF network

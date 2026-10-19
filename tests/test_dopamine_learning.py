@@ -1,4 +1,5 @@
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -168,3 +169,19 @@ def test_dopamine_signal_selection():
         0.0,
         "no_response",
     )
+
+
+def test_prediction_error_centers_signal_and_tracks_baseline():
+    # Requirement: RPE teaching signal -- reward minus a running expectation.
+    cfg = _config()
+    runner = types.SimpleNamespace(config=cfg, reward_baseline=0.0)
+
+    first = learning.TrialRunner._prediction_error(runner, 1.0)
+    assert first == 1.0, "the first reward is fully surprising"
+    assert runner.reward_baseline > 0.0, "baseline must rise toward the reward"
+
+    second = learning.TrialRunner._prediction_error(runner, 1.0)
+    assert 0.0 < second < first, "an expected reward must teach less"
+
+    worse = learning.TrialRunner._prediction_error(runner, -1.0)
+    assert worse < 0.0, "an outcome worse than expected is a negative error"

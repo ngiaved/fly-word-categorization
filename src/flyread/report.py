@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 CONDITION_LABELS: dict[str, str] = {
     "untrained": "untrained network",
     "trained": "trained (main result)",
+    "online_rpe": "trained, online RPE-gated credit",
     "shuffled_labels": "shuffled training labels",
     "shuffled_labels_no_growth": "shuffled labels, growth off",
     "dopamine_off": "dopamine off",

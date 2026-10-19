@@ -802,16 +802,31 @@ class TrialRunner:
                 # correct one is rewarded on the SAME trial. The teacher gate
                 # still comes from real reinforcement-neuron spiking, so the
                 # update is still gated by a biological three-factor signal.
-                teacher_gate = self._deliver_teaching(dopamine, trial_index)
                 valence = credit_valence(
                     result.predicted, true_label, len(counts), self.config
                 )
+                delivered = dopamine
+                if bool(self.config.get("learning.rpe_per_class", False)):
+                    # Reward-prediction-error gating: scale the perceptron-style
+                    # valence by the ABSOLUTE prediction error so an outcome the
+                    # network already expects barely moves the weights, while
+                    # surprising outcomes teach strongly. Direction (punish
+                    # chosen / reward true) is preserved, so this cannot invert
+                    # the correction -- only its magnitude is set by surprise.
+                    delivered = self._prediction_error(dopamine)
+                    valence = valence * abs(delivered)
+                teacher_gate = self._deliver_teaching(delivered, trial_index)
                 valence = valence * teacher_gate
-                apply_dopamine(
-                    self.network, self.config,
-                    dopamine * teacher_gate, self.stats, valence=valence,
-                )
-                dopamine = dopamine * teacher_gate
+                if np.any(valence):
+                    apply_dopamine(
+                        self.network, self.config,
+                        delivered * teacher_gate, self.stats, valence=valence,
+                    )
+                    dopamine = delivered * teacher_gate
+                else:
+                    # An exactly expected outcome (RPE == 0) is a no-op: do not
+                    # count it as an update or touch the weights.
+                    dopamine = 0.0
             else:
                 delivered = dopamine
                 if bool(self.config.get("learning.reward_baseline", True)):
@@ -912,6 +927,10 @@ class TrialRunner:
         punishment decrease weights only when the outcome is worse than
         expected, instead of depressing every synapse on the ~75% of
         chance-level trials the 4-way readout gets wrong.
+
+        Shared by both credit routes: ``global`` delivers this scalar directly,
+        while ``per_class`` (when ``learning.rpe_per_class`` is set) uses its
+        absolute value to gate the per-output valence vector.
         """
         rate = float(self.config.get("learning.baseline_rate", 0.02))
         error = dopamine - self.reward_baseline
