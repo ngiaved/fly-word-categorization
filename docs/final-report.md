@@ -11,6 +11,28 @@ without reframing:
    real antennal-lobe projection neurons (ALPN) → Kenyon cell → MBON chain.
    This is now the default configuration.
 
+> **Superseded in part.** This report documents the nulls at the calibrated
+> operating point. The negative finding was followed by a *recode* experiment:
+> raising the `ALPN → Kenyon cell` gain (with a widened calibration ceiling)
+> restores a decodable Kenyon-cell class code and a post-hoc supervised decoder
+> then recovers the task (held-out 0.363 at gain 20, 0.418 at gain 50, up to 0.833
+> with structural growth on the main recode run). Those are the current results;
+> see [current-state.md](current-state.md), [paper.md](paper.md), and
+> `runs/recode-v2-merged`, `runs/recode-50-v2-merged`.
+>
+> The recode is a diagnostic intervention outside the physiological band, and the
+> growth-matched controls have now been **run** (`runs/recode-50-controls-merged`,
+> 10 seeds): structural growth still beats no-growth (`structural_on` 0.750 vs
+> `trained` 0.418, *p* = 0.002), but the gain is unchanged when all label guidance
+> is removed (`structural_unguided` 0.785, *p* = 0.75) or category inheritance is
+> broken (`structural_random_category` 0.707, *p* = 0.61), and a **no-growth
+> decoder given 300 random Kenyon-cell projections reaches 0.983**, above every
+> growth condition. So the growth effect is a decoder-capacity effect, not a
+> learned, label-guided prototype; the dopamine rule remains non-contributory
+> (`dopamine_off` 0.828 vs `structural_on` 0.750, *p* = 0.084); and the online
+> MBON-argmax readout stays at chance throughout, so none of this is online
+> learning.
+
 **Neither task produced significant learning in the real evaluation pipeline.**
 The visual task is a documented negative result. The odor task removes every
 synthetic component the visual task needed, and the formal 10-seed run

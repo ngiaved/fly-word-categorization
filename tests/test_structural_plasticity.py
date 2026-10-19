@@ -427,6 +427,63 @@ def test_recruit_divergence_from_anchor_at_least_0_8():
             )
 
 
+def test_category_guidance_off_assigns_random_recruit_categories():
+    # Growth-matched control: with category_guidance off, a recruit must NOT
+    # inherit the anchor's category, so label-guided category construction is
+    # broken. The categories are drawn from the full label set.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "6",
+        "structural.prune_per_recruit": "0",
+        "structural.recruitment.category_guidance": "false",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+    # Make category 0 the successful anchor.
+    for _ in range(50):
+        sp.observe_trial(0, "reward")
+
+    events = [e for e in sp.step(trial=1) if e.kind == "recruit"]
+    assert events, "recruitment must occur"
+    categories = {e.detail["readout_category"] for e in events}
+    assert categories != {0}, (
+        "random-category recruits must not all inherit the anchor category"
+    )
+    # The ledger must match the events so the readout credits them correctly.
+    for event in events:
+        unit = event.detail["new_neuron_index"]
+        assert int(built.reserve_categories[unit]) == event.detail["readout_category"]
+
+
+def test_unguided_recruitment_draws_random_anchor_and_inputs():
+    # Growth-matched control: unguided growth picks a random anchor and uniform
+    # inputs, so there is no reward/label guidance of network structure.
+    cfg = _config(**{
+        "structural.recruit_every_n_checks": "1",
+        "structural.max_recruits_per_interval": "6",
+        "structural.prune_per_recruit": "0",
+        "structural.recruitment.anchor": "random",
+        "structural.recruitment.input_source": "random",
+        "structural.recruitment.category_guidance": "false",
+    })
+    built = _built(cfg)
+    sp = structural.StructuralPlasticity(built, cfg, seed=1)
+    for _ in range(50):
+        sp.observe_trial(0, "reward")
+
+    events = [e for e in sp.step(trial=1) if e.kind == "recruit"]
+    assert events, "recruitment must occur"
+    # With no anchor sources to be adjacent to, the achieved divergence is 0.
+    for event in events:
+        assert event.detail["divergence"] == 0.0, (
+            "unguided recruitment must not claim divergence from an anchor"
+        )
+    summary = sp.summary()
+    assert summary["controls"]["anchor"] == "random"
+    assert summary["controls"]["input_source"] == "random"
+    assert summary["controls"]["category_guidance"] is False
+
+
 def test_retirement_deletions_track_additions():
     # With the weight-threshold gate silent, forced retirement must still
     # deliver prune_per_recruit deletions per recruited neuron, after giving

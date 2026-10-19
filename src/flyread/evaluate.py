@@ -57,6 +57,37 @@ CONDITIONS: dict[str, dict[str, Any]] = {
     # A no-growth control (structural disabled) so it differs from
     # structural_on/off only by the pretraining.
     "trained_pretrained": {"trained": True, "structural": False, "pretrain": True},
+    # -- Growth-matched controls (reviewer-requested ablations) ------------
+    # Growth on, but recruits get random categories instead of inheriting the
+    # anchor's: breaks label-guided category construction.
+    "structural_random_category": {
+        "trained": True,
+        "structural": True,
+        "overrides": ["structural.recruitment.category_guidance=false"],
+    },
+    # Fully unguided growth: random anchor unit, uniformly random inputs, random
+    # categories. Matched to structural_on in recruited-neuron count and fan-in
+    # statistics, but carries no reward/label information.
+    "structural_unguided": {
+        "trained": True,
+        "structural": True,
+        "overrides": [
+            "structural.recruitment.anchor=random",
+            "structural.recruitment.input_source=random",
+            "structural.recruitment.category_guidance=false",
+        ],
+    },
+    # No growth, but the decoder gets the same number of extra (random) feature
+    # dimensions a growth-on condition adds, so a capacity-only explanation for
+    # growth's gain is directly testable.
+    "trained_extra_features": {
+        "trained": True,
+        "structural": False,
+        "overrides": [
+            "evaluation.extra_random_features=300",
+            "evaluation.readout=linear",
+        ],
+    },
 }
 
 
@@ -422,6 +453,9 @@ def condition_config(config, condition: str):
         overrides.append("encoding.shuffle_pixels=true")
     if settings.get("pretrain"):
         overrides.append("learning.pretrain=true")
+    # Condition-specific dotted overrides (e.g. growth-matched controls that
+    # flip structural.recruitment flags or add decoder features).
+    overrides.extend(settings.get("overrides", []))
 
     run_config = deepcopy(config.to_dict())
     from .config import Config
@@ -431,6 +465,35 @@ def condition_config(config, condition: str):
         result.apply_overrides(overrides)
     result.validate()
     return result, settings
+
+
+def _random_feature_builder(runner, config, seed: int, condition: str):
+    """Return a builder for the growth-matched extra decoder features.
+
+    The extras are fixed, seeded random projections of the Kenyon-cell
+    spike-count vector, matched in number to the recruited units a growth-on
+    condition adds. They let a no-growth decoder use the same extra feature
+    budget as growth, so a capacity-only explanation for growth's accuracy can
+    be separated from growth itself. Returns ``None`` when disabled.
+    """
+    n_extra = int(config.get("evaluation.extra_random_features", 0))
+    if n_extra <= 0:
+        return None
+    rng = make_rng(seed, stream=f"extra-random-features:{condition}")
+    cache: dict[str, Any] = {"proj": None, "size": None}
+
+    def build() -> np.ndarray:
+        window = runner.last_window or {}
+        kc = window.get("mushroom_body")
+        if kc is None:
+            return np.zeros(n_extra, dtype=np.float64)
+        kc = np.asarray(kc, dtype=np.float64)
+        if cache["proj"] is None or cache["size"] != kc.size:
+            cache["proj"] = rng.standard_normal((n_extra, kc.size))
+            cache["size"] = int(kc.size)
+        return cache["proj"] @ kc
+
+    return build
 
 
 def run_condition(
@@ -467,6 +530,14 @@ def run_condition(
     )
     runner = TrialRunner(network, run_config, mapping, seed=seed)
 
+    extra_builder = _random_feature_builder(runner, run_config, seed, condition)
+
+    def features_of(record) -> np.ndarray:
+        base = np.asarray(record.spike_counts, dtype=np.float64)
+        if extra_builder is None:
+            return base
+        return np.concatenate([base, extra_builder()])
+
     train_items = list(split.train)
     test_items = list(split.test)
 
@@ -501,7 +572,7 @@ def run_condition(
             record = runner.run_trial(
                 train_items[position].word, labels_for_training[position], step
             )
-            train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
+            train_vectors.append(features_of(record))
             train_fit_labels.append(labels_for_training[position])
             # runner.run_trial snapshots per-stage rates during the stimulus
             # window; the live monitors are cleared for the rest period.
@@ -533,7 +604,7 @@ def run_condition(
                 200_000 + exp,
                 learn=False,
             )
-            train_vectors.append(np.asarray(rec.spike_counts, dtype=np.float64))
+            train_vectors.append(features_of(rec))
             train_fit_labels.append(labels_for_training[position])
     else:
         train_accuracy = float("nan")
@@ -545,7 +616,7 @@ def run_condition(
             record = runner.run_trial(
                 item.word, item.label, 100_000 + index, learn=False
             )
-            train_vectors.append(np.asarray(record.spike_counts, dtype=np.float64))
+            train_vectors.append(features_of(record))
             train_fit_labels.append(item.label)
             structural.observe_trial(record.predicted, record.reward_type)
 
@@ -560,7 +631,7 @@ def run_condition(
                 item.word, item.label, 100_000 + len(eval_records), learn=False
             )
             true_labels.append(item.label)
-            test_vectors.append(np.asarray(probe.spike_counts, dtype=np.float64))
+            test_vectors.append(features_of(probe))
             eval_records.append(probe)
 
     readout_mode = str(run_config.get("evaluation.readout", "argmax"))
@@ -587,6 +658,16 @@ def run_condition(
         if true_labels else 0.0
     )
 
+    # Online MBON-argmax readout on the held-out words: the quantity that tests
+    # the plasticity rule itself, before the supervised decoder is layered on.
+    # The decoder is a representation-quality probe, not the online learner.
+    argmax_predictions = [record.predicted for record in eval_records]
+    argmax_test_accuracy = (
+        sum(1 for t, p in zip(true_labels, argmax_predictions) if p == t)
+        / len(true_labels)
+        if true_labels else 0.0
+    )
+
     return RunResult(
         condition=condition,
         seed=seed,
@@ -607,6 +688,8 @@ def run_condition(
             "weight_scale": weight_scale,
             "structural_event_count": len(structural.events),
             "pretrain": pretrain_info,
+            "argmax_test_accuracy": float(argmax_test_accuracy),
+            "readout_mode": readout_mode,
         },
     )
 
@@ -989,6 +1072,16 @@ def aggregate(
         ]
         stats["no_response_rate_mean"] = float(np.mean(no_response)) if no_response else 0.0
         stats["train_accuracy_mean"] = float(np.mean(train_acc)) if train_acc else None
+        # Online MBON-argmax held-out accuracy (pre-decoder). Absent in older
+        # archived runs, so it is optional rather than an error.
+        argmax_acc = [
+            r.extra.get("argmax_test_accuracy")
+            for sr in seed_results for r in [sr.results.get(condition)] if r
+            and r.extra.get("argmax_test_accuracy") is not None
+        ]
+        stats["argmax_test_accuracy_mean"] = (
+            float(np.mean(argmax_acc)) if argmax_acc else None
+        )
         stats["n_seeds"] = len(accuracies)
         conditions[condition] = stats
 

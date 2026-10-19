@@ -28,6 +28,9 @@ CONDITION_LABELS: dict[str, str] = {
     "structural_on": "structural plasticity on",
     "structural_off": "structural plasticity off",
     "trained_pretrained": "trained + supervised pretrain (positive control)",
+    "structural_random_category": "structural on, random recruit category (control)",
+    "structural_unguided": "structural on, unguided (control)",
+    "trained_extra_features": "trained, +random decoder features (control)",
 }
 
 
@@ -43,8 +46,8 @@ def conditions_table(report: EvaluationReport) -> str:
     """Markdown table of mean accuracy and CI per condition."""
     lines = [
         "| condition | mean acc | 95% CI | p vs chance | significant | "
-        "no-response | train acc |",
-        "|---|---|---|---|---|---|---|",
+        "no-response | online argmax | train acc |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for condition, stats in report.conditions.items():
         label = CONDITION_LABELS.get(condition, condition)
@@ -58,6 +61,7 @@ def conditions_table(report: EvaluationReport) -> str:
             f"{_fmt(p_value, 4) if p_value is not None else 'n/a'} | "
             f"{'yes' if stats.get('significant') else 'no'} | "
             f"{_fmt(stats.get('no_response_rate_mean'))} | "
+            f"{_fmt(stats.get('argmax_test_accuracy_mean'))} | "
             f"{_fmt(stats.get('train_accuracy_mean'))} |"
         )
     return "\n".join(lines)
@@ -327,7 +331,8 @@ def build_markdown(
         f"{manifest_summary.get('n_edges', '?')} simulated synapses",
         f"- calibrated weight scale: {meta.get('weight_scale', '?')}",
         f"- train trials per seed: {meta.get('n_train_trials', '?')}",
-        f"- wall-clock for the sweep: {_fmt(meta.get('total_seconds'), 1)} s",
+        f"- aggregate single-core compute across seeds: "
+        f"{_fmt(meta.get('total_seconds'), 1)} s",
         f"- codegen target: {meta.get('codegen_target', '?')}",
         "",
     ]

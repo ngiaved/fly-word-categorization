@@ -921,11 +921,12 @@ class TrialRunner:
     def _deliver_teaching(self, dopamine: float, trial_index: int = 0) -> float:
         """Drive real reinforcement neurons and return the gating factor.
 
-        The reward value is injected as a current into the real APL/DPM
-        reinforcement neurons. Their resulting spike count gates the weight
-        update, so plasticity only happens if genuine reinforcement neurons
-        actually respond: the three-factor rule is enforced by real FlyWire
-        neurons rather than by a bare scalar. Returns a value in [0, 1].
+        The reward value is injected as a current into the real reinforcement
+        neurons (the configured teaching class: `DAN` for odor-v1, `MBIN`/APL/
+        DPM for grid-v1). Their resulting spike count gates the weight update,
+        so plasticity only happens if genuine reinforcement neurons actually
+        respond: the three-factor rule is enforced by real FlyWire neurons
+        rather than by a bare scalar. Returns a value in [0, 1].
         """
         import brian2 as b2
 
@@ -988,10 +989,11 @@ class TrialRunner:
     def _apply_teacher(self, value: float) -> None:
         """Drive the real reinforcement neurons with a reward current.
 
-        The reward value is synthetic; the neurons it drives (APL/DPM from the
-        MBIN class) and their synapses onto Kenyon cells are real FlyWire
-        wiring. The teacher current therefore reaches the plastic pathway only
-        through genuine reinforcement connectivity.
+        The reward value is synthetic; the neurons it drives (the configured
+        teaching class: `DAN` for odor-v1, `MBIN`/APL/DPM for grid-v1) and their
+        synapses onto Kenyon cells are real FlyWire wiring. The teacher current
+        therefore reaches the plastic pathway only through genuine reinforcement
+        connectivity.
         """
         import brian2 as b2
 

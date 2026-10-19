@@ -1,0 +1,43 @@
+# Odor recode (gain 50) with the reviewer-requested growth-matched controls.
+#
+# The headline structural_on number (0.833) rests on an exploratory recruitment
+# rule whose category inheritance and anchor selection are guided by the
+# network's own predictions. This config runs that condition against matched
+# controls, so the claim "growth does the learning" can be separated from
+# "growth restores access to class information the readout bottleneck discards"
+# and from "label-guided structure constructs the prototype":
+#
+#   structural_random_category  growth on, but recruits get RANDOM categories
+#                               instead of inheriting the anchor's (breaks
+#                               label-guided category construction).
+#   structural_unguided         growth on, random anchor, random inputs, random
+#                               categories: no reward/label guidance at all,
+#                               matched in recruit count and fan-in statistics.
+#   trained_extra_features      no growth, but the decoder gets the same number
+#                               of extra (random) feature dimensions as growth
+#                               adds (evaluation.extra_random_features=300):
+#                               tests whether extra capacity alone explains the
+#                               gain.
+#
+# If structural_on beats the unguided/random-category controls and
+# trained_extra_features stays near the untrained floor, growth is doing more
+# than expanding the decoder's feature budget.
+network:
+  pair_gain:
+    mushroom_body>output: 10.0
+    olfactory>mushroom_body: 50.0
+calibration:
+  # Same widened ceiling as the main recode: a diagnostic operating point, not
+  # a claim about the physiological 0.5-15 Hz band.
+  max_mean_rate_hz: 100.0
+evaluation:
+  conditions:
+    - untrained
+    - trained
+    - dopamine_off
+    - dopamine_off_no_growth
+    - structural_on
+    - structural_off
+    - structural_random_category
+    - structural_unguided
+    - trained_extra_features

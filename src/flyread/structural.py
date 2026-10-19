@@ -144,6 +144,11 @@ class StructuralPlasticity:
         self.gain_mode = str(rec.get("gain", "average"))
         self.force_retire = bool(rec.get("force_retire", True))
         self.retirement_min_age = int(rec.get("retirement_min_age", 1))
+        # Growth-matched controls (reviewer-requested ablations). Defaults
+        # reproduce the label-guided recruitment the main result uses.
+        self.category_guidance = bool(rec.get("category_guidance", True))
+        self.anchor_mode = str(rec.get("anchor", "successful"))
+        self.input_source_mode = str(rec.get("input_source", "anchor"))
 
         # Input-set signatures ever used, so "no two neurons look the same".
         self._input_signatures: set[frozenset[int]] = set()
@@ -618,7 +623,12 @@ class StructuralPlasticity:
 
         Only outputs that have actually responded are eligible; before any
         reinforceable trials the first output is the deterministic fallback.
+        With ``recruitment.anchor = random`` the anchor is drawn uniformly
+        instead, which is the unguided-recruitment control: growth is then not
+        steered by the reward/label signal at all.
         """
+        if self.anchor_mode == "random":
+            return int(self._rng.integers(0, max(1, self.n_categories)))
         eligible = self._winner_seen > 0
         if not np.any(eligible):
             return 0
@@ -774,7 +784,11 @@ class StructuralPlasticity:
         population_std = float(population_weights.std())
 
         anchor_category = self._anchor_category()
-        winner_sources = self._winner_sources(anchor_category)
+        winner_sources = (
+            self._winner_sources(anchor_category)
+            if self.input_source_mode == "anchor"
+            else np.array([], dtype=np.int64)
+        )
 
         events: list[StructuralEvent] = []
         for _offset in range(n_new):
@@ -860,7 +874,11 @@ class StructuralPlasticity:
                 [self._retire_age, np.zeros(n_syn, dtype=np.int64)]
             )
 
-            category = anchor_category
+            category = (
+                int(self._rng.integers(0, max(1, self.n_categories)))
+                if not self.category_guidance
+                else anchor_category
+            )
             self.network.reserve_categories[reserve_local] = int(category)
             self._recruited += 1
             events.append(StructuralEvent(
@@ -1002,6 +1020,14 @@ class StructuralPlasticity:
                 "of its inputs, draw the rest pseudo-randomly at average gain, "
                 "and share no identical input set. Deletions are reserve-"
                 "synapse prunes budgeted at prune_per_recruit per recruited "
-                "neuron, topped up by retirement of the weakest synapses."
+                "neuron, topped up by retirement of the weakest synapses. "
+                "Controls: recruitment.category_guidance=false assigns random "
+                "categories; recruitment.anchor=random picks a random anchor; "
+                "recruitment.input_source=random draws inputs uniformly."
             ),
+            "controls": {
+                "category_guidance": self.category_guidance,
+                "anchor": self.anchor_mode,
+                "input_source": self.input_source_mode,
+            },
         }

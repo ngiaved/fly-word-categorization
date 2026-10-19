@@ -158,8 +158,12 @@ class SimulationNetwork:
                     for name, indices in self.teacher_stage_indices.items()
                 },
                 "note": (
-                    "Real reinforcement neurons (APL/DPM) drive Kenyon cells. "
-                    "Only the reward value injected into them is synthetic."
+                    "Real reinforcement neurons (the configured teaching class: "
+                    "`DAN` for odor-v1, `MBIN` for grid-v1 — the latter are APL/"
+                    "DPM and not canonical dopamine neurons). Only the reward "
+                    "value injected into them is synthetic. The measured "
+                    "reinforcement -> Kenyon cell edges are not simulated in this "
+                    "build; the reward is a global scalar gated by their spikes."
                 ),
             },
             "artificial_role_pairs": list(self.artificial_role_pairs),

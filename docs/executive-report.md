@@ -4,10 +4,14 @@
 the word-classification task at its calibrated operating point — a robust,
 well-controlled null. The null is not a dead end: positive controls localise the
 failure to a single transform (`ALPN → Kenyon cell`), and *recoding that
-transform's gain turns the same harness into a working learner*. The fix is
-mechanistic, not a protocol artefact: raising the gain lifts held-out accuracy
-from chance to **0.418** (trained) and **0.833** (`structural_on`) across 10
-seeds, with no data-leakage warning.
+transform's gain makes the Kenyon-cell class code decodable*, lifting post-hoc
+decoder held-out accuracy above chance to **0.418** (trained) and as high as
+**0.983** with extra features, across 10 seeds, with no data-leakage warning.
+The growth-matched controls, now run, show that **the circuit does not learn
+online**: the MBON-argmax readout stays at chance, the "structural growth"
+headline is a decoder-capacity effect (unchanged when label guidance is removed,
+beaten by random features with no growth), and the dopamine rule contributes
+nothing. See [current-state.md](current-state.md).
 
 ---
 
@@ -30,12 +34,15 @@ instrument.
 | run | task / gain | trained held-out acc | verdict |
 |---|---|---|---|
 | `odor-v1-merged` | odor, calibrated baseline | **0.262** (10 seeds, 600 trials) | null (not significant, p = 0.21) |
-| `recode-v2-merged` | odor, recode gain 20 | **0.363** (10 seeds, p = 0.0013) | **learns** |
-| `recode-50-v2-merged` | odor, recode gain 50 | **0.418** (10 seeds, p = 8.5e-5) | **learns** |
+| `recode-v2-merged` | odor, recode gain 20 | **0.363** (10 seeds, p = 0.0013) | above chance |
+| `recode-50-v2-merged` | odor, recode gain 50 | **0.418** (10 seeds, p = 8.5e-5) | above chance |
+| `recode-50-controls-merged` | odor, gain 50 + growth controls | **0.418** trained; **0.750** growth; **0.983** random features | decoder capacity, not learning |
 
 The visual task is a documented negative result (0.233, 2 seeds). All odor runs
 pass the positive-control gate (input probe 1.000; Kenyon-cell probe 0.95–1.00)
-and carry no data-leakage warning.
+and carry no data-leakage warning. In every run the **online MBON-argmax readout
+stays at chance (≈0.25)**, so all reported accuracies are supervised
+post-hoc-decoder representation quality, not online learning.
 
 ## 3. Why the baseline fails — and how it was fixed
 
@@ -61,12 +68,21 @@ accuracy across conditions:
 | shuffled_labels | 0.330 | 0.245 |
 | shuffled_labels_no_growth | 0.230 | 0.233 |
 
-Two mechanistic findings:
+Three mechanistic findings:
 
 - **Accuracy tracks structural growth, not dopamine.** With growth on
   (`structural_on`, `dopamine_off`) accuracy far exceeds the growth-off controls
   (`trained`, `structural_off`); turning growth off collapses accuracy toward the
-  untrained floor. Turning dopamine off does not.
+  untrained floor. Turning dopamine off does not (`recode-50-controls-merged`:
+  `dopamine_off` 0.828 vs `structural_on` 0.750, p = 0.084).
+- **The growth gain is decoder capacity, not a learned prototype.** The
+  growth-matched controls (10 seeds) show the gain is statistically unchanged when
+  all label guidance is removed (`structural_unguided` 0.785, p = 0.75) or
+  category inheritance is broken (`structural_random_category` 0.707, p = 0.61),
+  and is exceeded by a no-growth decoder given 300 random Kenyon-cell projections
+  (0.983, p = 0.002 vs trained). Growth adds the same number of decoder feature
+  dimensions, so it improves access to an already-decodable code rather than
+  learning one.
 - **The residual is structural, not leakage.** The shuffled-label control sits at
   or below the untrained floor and is not significant, and the no-growth
   isolation control is at/below chance (0.230 / 0.233). So the above-chance floor
@@ -89,16 +105,21 @@ Two mechanistic findings:
 
 ## 5. Recommendations
 
-1. **Adopt the recode as the new baseline** for any follow-up learning
-   experiments; the calibrated baseline is a confirmed dead end for this signal
-   path.
-2. **Push the recode further** — sweep denser/sparser Kenyon-cell codes, input
-   scaling, and non-linear readouts now that a learnable code exists.
-3. **Keep structural growth in scope** — it is the effective learning mechanism
-   here; add a reward-prediction-error baseline so the per-class credit rule is
-   not swamped by the ≈75 % wrong-at-chance surplus.
-4. **Simulate the real `DAN → mushroom body` edges** instead of the global-scalar
-   reward surrogate.
+1. **Treat the recode as a diagnostic probe, not as evidence of learning.** It
+   localises the bottleneck to the `ALPN → Kenyon cell` transform, but every
+   score is a post-hoc supervised decoder over the representation, and the online
+   MBON-argmax readout never leaves chance.
+2. **Do not report the growth numbers as learning.** The growth-matched controls
+   show the growth gain is decoder capacity: it survives removal of label
+   guidance and is beaten by random features with no growth. Report
+   `trained_extra_features` (0.983) alongside any growth number as the
+   capacity reference.
+3. **Build an online-learning benchmark before claiming the circuit learns.**
+   The MBON-argmax readout must beat the untrained floor online; a
+   reward-prediction-error baseline would remove the ≈75 % wrong-at-chance
+   surplus that swamps the per-class credit rule.
+4. **Simulate the real `DAN → mushroom body` edges** instead of the
+   global-scalar reward surrogate (backward stage pair currently dropped).
 5. **Do not add seeds** to the baseline null — the ≥ 10-seed runs already exclude
    under-powering.
 
@@ -108,9 +129,13 @@ Two mechanistic findings:
 python -m pip install -r requirements.lock.txt && python -m pip install -e .
 python -m flyread fetch-data
 python -m flyread --config configs/odor-recode-50.yaml --run-id recode-50-v2 sweep
+python -m flyread --config configs/odor-recode-50-controls.yaml \
+    --run-id recode-50-controls sweep
 ```
 
 Archived: `runs/odor-v1-merged` (baseline null), `runs/recode-v2-merged`
-(gain 20), `runs/recode-50-v2-merged` (gain 50), and the isolation controls
+(gain 20), `runs/recode-50-v2-merged` (gain 50), the growth-matched controls
+`runs/recode-50-controls-merged`, and the isolation controls
 `runs/recode-v2-extra-merged`, `runs/recode-50-extra-merged`. Full detail in
-[`docs/final-report.md`](final-report.md).
+[`docs/final-report.md`](final-report.md) and
+[`docs/current-state.md`](current-state.md).

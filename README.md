@@ -20,10 +20,48 @@ Either way four output neurons are read out as `animal / food / tool / place`.
 
 ---
 
+## Current state (19 October 2026)
+
+Plain-language summary; full detail in [docs/current-state.md](docs/current-state.md).
+
+- The real olfactory subcircuit **does not learn the task at its physiological
+  operating point** — a confirmed null localised to the `ALPN → Kenyon cell`
+  transform (positive controls: input probe 1.000, Kenyon-cell probe 0.255).
+- Raising that transform's gain (a diagnostic "recode", ceiling 100 Hz) restores
+  a decodable Kenyon-cell class code; the **post-hoc supervised decoder** then
+  recovers the task (0.418 at gain 50).
+- The **online MBON-argmax readout stays at chance (≈0.25) in every condition**,
+  so this is representation quality, **not online learning**.
+- **Structural growth helps decoding but is not special.** The growth-matched
+  controls (`runs/recode-50-controls-merged`, 10 seeds) show the
+  growth gain (`structural_on` 0.750 vs `trained` 0.418) **survives the removal
+  of all label guidance** (`structural_unguided` 0.785, *p* = 0.75) and of
+  category inheritance (`structural_random_category` 0.707, *p* = 0.61), and is
+  **exceeded by 300 random decoder features with no growth** (0.983). The effect
+  is therefore a **decoder-capacity / representation-access effect**, not a
+  learned, label-guided prototype.
+- Dopamine gating remains non-contributory (`dopamine_off` 0.828 vs
+  `structural_on` 0.750, *p* = 0.084).
+
 ## Status: read this before trusting any number
 
 This repository contains a working implementation and an honest account of what
-does and does not work yet. **No results should be reported from it yet.**
+does and does not work. **The authoritative results are the recoded runs
+(`runs/recode-v2-merged`, gain 20; `runs/recode-50-v2-merged`, gain 50), the
+growth-matched control run (`runs/recode-50-controls-merged`, gain 50), and the
+manuscript in [docs/paper.md](docs/paper.md).** At the physiological operating
+point the odor task is a confirmed null; raising the `ALPN → Kenyon cell` gain
+restores a decodable Kenyon-cell class code and the network then scores above the
+untrained floor under a supervised post-hoc decoder (held-out 0.363 at gain 20,
+0.418 at gain 50). Structural growth raises decoder accuracy further (up to
+0.833 on the main recode run, 0.750 on the matched-control run), but the controls
+show that gain is a decoder-capacity effect: it does not require label guidance
+and is beaten by plain random features (0.983). The recode is a diagnostic
+intervention — it runs at a 100 Hz calibration ceiling, far outside the
+physiological 0.5–15 Hz band — not a claim about the circuit *in vivo*. Older run
+directories and any README text predating the recode are superseded; where the
+README and an archived run disagree, the archived run plus its manifest is
+authoritative.
 
 | Area | State |
 |---|---|
@@ -33,35 +71,50 @@ does and does not work yet. **No results should be reported from it yet.**
 | Deterministic word rendering + encoding (`grid-v1`) | Working |
 | Deterministic sparse odor encoding (`odor-v1`) | Working |
 | Brian2 network construction (visual and olfactory) | Working |
-| Calibration to a spontaneous operating regime | Working (accepted in-band scale 4–6) |
+| Calibration to a spontaneous operating regime | Working (accepted in-band scale 4–6 for the default; recode widens the ceiling to 100 Hz) |
 | CPU feasibility gate (Task 0.3/0.4) | **Not yet passed** |
-| Learning / evaluation / report | Runs end to end; **both tasks are null results** (see below) |
+| Learning / evaluation / report | Physiological baseline is a null; **the recode scores above the untrained floor under a post-hoc decoder** (no online learning; see below) |
 
-The current blocking item is the **dopamine-gated `mushroom body → output`
-readout**. Two tasks have been run through the full pipeline:
+The current blocking item is still the **dopamine-gated `mushroom body → output`
+readout** at the calibrated operating point. Work so far:
 
 1. **`grid-v1` (visual, 2 seeds):** null. The mushroom body receives essentially
    no optic-lobe input in release 783, so the required chain was bridged
    artificially; the word-class signal was already lost before the readout.
-2. **`odor-v1` (olfactory, current default, 10-seed formal run):** null, but
-   with **zero synthetic edges** — every simulated edge is real
-   `ALPN → Kenyon cell → MBON` connectivity. Across 10 seeds the trained readout
-   scored **0.262** (95 % CI [0.237, 0.287]), not above chance 0.25 (p = 0.21),
-   and its untrained control scored 0.227. Every condition is at chance; the
-   output stage is not silent, so the signal is lost upstream of the readout.
-3. **Positive controls (10 seeds, two tasks):** the evaluation instrument is
-   now validated and the null is localised. A supervised linear probe decodes
-   the category **perfectly from the stimulus** (input probe 1.000 on every
-   seed) but **at chance from the Kenyon-cell population** (probe 0.255
-   default / 0.227 separable task), so the positive-control gate fails with
-   "the label signal is lost before the plastic readout". A supervised-
-   pretrained readout that fits the Kenyon-cell features to 1.000 still
-   generalises at chance, on both an overlapping and a trivially separable
-   task. **The bottleneck is the `ALPN → Kenyon cell` transform.**
+2. **`odor-v1` (olfactory, 10-seed formal run):** null at the calibrated
+   operating point, but with **zero synthetic edges** — every simulated edge is
+   real `ALPN → Kenyon cell → MBON` connectivity. Trained readout **0.262**
+   (95 % CI [0.237, 0.287]), not above chance 0.25 (p = 0.21); untrained 0.227.
+3. **Positive controls (10 seeds, two tasks):** instrument validated and the
+   null localised. A supervised linear probe decodes the category **perfectly
+   from the stimulus** (input probe 1.000) but **at chance from the Kenyon-cell
+   population** (probe 0.255 / 0.227). **The bottleneck is the `ALPN → Kenyon
+   cell` transform.**
+4. **Recode (10 seeds each):** raising that transform's gain to 20 or 50 and
+   widening the calibration ceiling to 100 Hz restores the Kenyon-cell code
+   (probe 0.950–1.000) and the network scores above the untrained floor:
+   held-out decoder accuracy 0.363 (gain 20) and 0.418 (gain 50); growth-on
+   conditions reach 0.608 / 0.833 on the main recode run. The online
+   MBON-argmax readout stays at chance (≈0.25) in every condition except the
+   supervised-pretrained control, so the reported numbers are representation
+   quality under a post-hoc supervised decoder, not proof of online learning;
+   see [Known issues](#known-issues).
+5. **Growth-matched controls (10 seeds, `runs/recode-50-controls-merged`):**
+   run and reported (Section 4.3b of the manuscript). Structural growth still
+   beats no-growth (`structural_on` 0.750 vs `trained` 0.418, +0.37,
+   *p* = 0.002), but the gain **does not depend on label guidance**
+   (`structural_unguided` 0.785, *p* = 0.75) **or category inheritance**
+   (`structural_random_category` 0.707, *p* = 0.61), and a **no-growth decoder
+   given 300 random features reaches 0.983**, above every growth condition. So
+   the growth effect is a decoder-capacity / representation-access effect, not a
+   learned prototype; dopamine remains non-contributory (0.828 vs 0.750,
+   *p* = 0.084). This demotes the earlier "growth does the learning" headline;
+   see [docs/current-state.md](docs/current-state.md).
 
-Both are documented in full in [docs/final-report.md] (negative results,
-reported without reframing); a manuscript draft is in
-[docs/paper.md](docs/paper.md). See [Known issues](#known-issues).
+The negative results are documented in full in
+[docs/final-report.md](docs/final-report.md); a
+manuscript draft is in [docs/paper.md](docs/paper.md). See
+[Known issues](#known-issues).
 
 ---
 
@@ -126,13 +179,20 @@ Both options were reviewed explicitly before any code was written:
    printed in the manifest and the report. It is never described as FlyWire
    connectivity.
 
-2. **Real reinforcement neurons as the teachers.** The `MBIN` class in release
-   783 contains exactly 2× APL (GABA) and 2× DPM (dopamine) neurons, which make
-   real synapses onto Kenyon cells. The reward **value** is synthetic, but it
-   is injected into these real neurons, and their resulting spike count **gates**
-   the weight update. Plasticity therefore only happens if genuine
-   reinforcement neurons respond — the three-factor rule is enforced by real
-   neurons rather than by a bare scalar.
+2. **Real reinforcement neurons as the teachers.** The default olfactory task
+   (`odor-v1`) selects the real `DAN` (dopaminergic) class — 4 neurons and
+   49,616 real `DAN → Kenyon cell` edges. The visual `grid-v1` task instead uses
+   the `MBIN` class, which in release 783 holds 2× APL and 2× DPM neurons; these
+   are **not** a canonical dopaminergic cluster (APL is GABAergic, DPM is
+   serotonergic), so `grid-v1` should not be read as a real DAN circuit. In both
+   tasks the reward **value** is synthetic, but it is injected into these real
+   neurons and their resulting spike count **gates** the weight update, so
+   plasticity only happens if genuine reinforcement neurons respond.
+
+   Caveat: the real `DAN → Kenyon cell` edges are extracted but **not simulated**
+   — the odor network wires stage pairs in signal order, so those backward edges
+   are dropped and the reward is applied as a global scalar gated by the DANs'
+   spike counts (Known issue 9). Reordering the stages would exercise them.
 
 ---
 
@@ -310,14 +370,30 @@ rendering, dataset splits, and trial order.
    so the lobula stage is weakly driven in the real data. Stage selection for
    the lobula may need rethinking.
 5. The reward signal is synthetic. Only the neurons it reaches are real.
-6. **`structural_on` has not yet beaten `trained`, and through the real
-   pipeline everything is at chance.** Through the real pipeline
-   (`runs/run-20261008T204756Z`, 2 seeds, 100 training trials) untrained 0.258,
-   trained 0.233, structural_on 0.283 against chance 0.25 — trained lands *at
-   or below* untrained, so structural growth has no advantage above it to beat.
-   The earlier 0.45–0.567 numbers came from a harness operating point and are
-   withdrawn. Whether a more informative recruitment rule is needed (or whether
-   any recruitment benefit exists) is unresolved.
+6. **The growth effect is a decoder-capacity effect, not a learned prototype
+   (controls now run).** At the calibrated operating point
+   (`runs/run-20261008T204756Z`, 2 seeds, 100 trials) untrained 0.258, trained
+   0.233, structural_on 0.283 against chance 0.25 — growth had no advantage to
+   beat, and the earlier 0.45–0.567 numbers from a harness operating point were
+   withdrawn. Under the recode (gain 50) growth clearly beats no-growth
+   (`structural_on` 0.750 vs `structural_off` 0.378 / `trained` 0.418,
+   +0.37, *p* = 0.002, in `runs/recode-50-controls-merged`). The reviewer-matched
+   controls, however, show the gain is **not** about the recruitment rule:
+   removing all label guidance (`structural_unguided` 0.785, *p* = 0.75) or
+   category inheritance (`structural_random_category` 0.707, *p* = 0.61) leaves
+   it unchanged, and a **no-growth decoder given 300 random Kenyon-cell
+   projections reaches 0.983** (*p* = 0.002 vs `trained`), above every growth
+   condition. So growth is best read as extra decoder access to an already
+   decodable Kenyon-cell code, not as a structure that learns or a prototype that
+   is constructed; switching dopamine off changes nothing (`dopamine_off` 0.828
+   vs `structural_on` 0.750, *p* = 0.084). Separately, the online MBON-argmax
+   readout stays at ≈0.25 in every condition except the supervised-pretrained
+   control, so the headline rests on the post-hoc supervised decoder
+   (representation quality), not on an online learner. Note also a
+   run-order RNG sensitivity: `structural_on` scores 0.750 here vs 0.833 in
+   `runs/recode-50-v2-merged`, and `trained` vs `structural_off` (identical
+   configs) differ slightly, so only internally-paired contrasts are
+   interpreted.
 7. **Visual (`grid-v1`): the word signal is lost upstream of the readout.**
    Through the real pipeline, 42–65 % of test presentations get a zero-spike
    output reading (`no-response`) at the archived drive, so both the argmax
@@ -409,6 +485,29 @@ rendering, dataset splits, and trial order.
   `encoding.odor.active_elsewhere: 0`) makes the four categories disjoint by
   construction, so a trivial linear readout of the stimulus solves the task
   (input probe 1.000) while the network and probes still land at chance.
+- **A recode** (`configs/odor-recode.yaml`, `configs/odor-recode-50.yaml`,
+  `network.pair_gain.olfactory>mushroom_body` 20/50 with
+  `calibration.max_mean_rate_hz: 100`) raises the `ALPN → Kenyon cell` gain so
+  the class code survives that transform. The recode is a diagnostic
+  intervention outside the physiological band, not a new baseline.
+- **Growth-matched controls** were added for the recode
+  (`configs/odor-recode-50-controls.yaml`): `structural_random_category`
+  (`structural.recruitment.category_guidance: false`) breaks label-guided
+  category inheritance; `structural_unguided`
+  (`recruitment.anchor: random`, `recruitment.input_source: random`) removes all
+  reward/label guidance of growth; and `trained_extra_features`
+  (`evaluation.extra_random_features: 300`) gives a no-growth decoder the same
+  extra feature budget growth adds. Condition dicts may now carry a generic
+  `overrides` list of dotted config keys. **Run at 10 seeds
+  (`runs/recode-50-controls-merged`).** Outcome: growth beats no-growth
+  (*p* = 0.002) but is unchanged by removing label guidance (*p* = 0.75) or
+  category inheritance (*p* = 0.61), and is beaten by the random-feature
+  no-growth control (0.983 vs 0.750, *p* = 0.002) — the growth gain is decoder
+  capacity, not a learned, label-guided prototype.
+- **The online MBON-argmax held-out accuracy is recorded** per condition
+  (`extra.argmax_test_accuracy`, reported as `argmax_test_accuracy_mean`) so the
+  plasticity-rule readout and the supervised decoder can be told apart. In every
+  recode condition except `trained_pretrained` it is at chance.
 
 ## Licensing
 

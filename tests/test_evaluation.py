@@ -55,6 +55,46 @@ def _seed_results(accuracy_for):
     return results
 
 
+def test_growth_matched_control_conditions_apply_their_overrides():
+    # Reviewer-requested controls must resolve to exactly the intended config.
+    cfg, _ = _dataset()
+
+    rc, _ = evaluate.condition_config(cfg, "structural_random_category")
+    assert rc.get("structural.enabled") is True
+    assert rc.get("structural.recruitment.category_guidance") is False
+
+    rc, _ = evaluate.condition_config(cfg, "structural_unguided")
+    assert rc.get("structural.enabled") is True
+    assert rc.get("structural.recruitment.anchor") == "random"
+    assert rc.get("structural.recruitment.input_source") == "random"
+    assert rc.get("structural.recruitment.category_guidance") is False
+
+    rc, _ = evaluate.condition_config(cfg, "trained_extra_features")
+    assert rc.get("structural.enabled") is False
+    assert int(rc.get("evaluation.extra_random_features")) == 300
+    assert rc.get("evaluation.readout") == "linear"
+
+
+def test_random_feature_builder_matches_recruit_dimension():
+    # The capacity control must add exactly the configured number of extra
+    # features and be deterministic per (condition, seed).
+    class _Runner:
+        last_window = {"mushroom_body": np.arange(12, dtype=np.float64)}
+
+    cfg, _ = _dataset()
+    rc, _ = evaluate.condition_config(cfg, "trained_extra_features")
+    builder = evaluate._random_feature_builder(_Runner(), rc, 1000, "trained_extra_features")
+    first, second = builder(), builder()
+    assert first.shape == (300,)
+    assert np.allclose(first, second), "extra features must be deterministic"
+    other = evaluate._random_feature_builder(
+        _Runner(), rc, 1001, "trained_extra_features"
+    )()
+    assert not np.allclose(first, other), "extra features must depend on the seed"
+
+    assert evaluate._random_feature_builder(_Runner(), cfg, 1000, "trained") is None
+
+
 def test_split_is_15_5_per_category_and_deterministic():
     # Requirement: Held-out evaluation -- train/test split
     cfg, dataset = _dataset()

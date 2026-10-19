@@ -43,9 +43,12 @@ INPUT_STAGES: tuple[str, ...] = (ROLE_PHOTORECEPTOR,)
 MUSHROOM_BODY_STAGES: tuple[str, ...] = ("mushroom_body",)
 # Stage names read out as categories.
 OUTPUT_STAGES: tuple[str, ...] = (ROLE_OUTPUT,)
-# Stage names carrying the teaching/reinforcement signal. In release 783 the
-# MBIN class holds 2x APL (GABA) and 2x DPM (dopamine) neurons, which make
-# real synapses onto Kenyon cells and are the natural dopamine source.
+# Stage names carrying the teaching/reinforcement signal. The default odor task
+# selects the real `DAN` (dopaminergic) cell class. The visual `grid-v1` task
+# instead selects `MBIN`, which in release 783 holds 2x APL (GABA) and 2x DPM
+# (serotonergic) neurons; those are real reinforcement neurons but are NOT a
+# canonical dopaminergic cluster, so grid-v1 must not be read as a real DAN
+# circuit.
 TEACHER_STAGES: tuple[str, ...] = ("reinforcement",)
 
 # Annotation fields this module can filter on, per _matches().

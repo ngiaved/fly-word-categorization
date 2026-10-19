@@ -355,9 +355,9 @@ network:
   # everywhere, so loop gain follows edge counts instead of synapse counts.
   pair_weight_normalisation: fan_in_total
   # Reward signal injected into the real reinforcement stage. The reward VALUE
-  # is synthetic; the neurons receiving it (here the DAN class, previously
-  # APL/DPM in the visual chain) and their real synapses onto Kenyon cells are
-  # genuine FlyWire neurons and connections.
+  # is synthetic; the neurons receiving it (the configured teaching class: DAN
+  # for odor-v1, MBIN/APL/DPM for grid-v1) and their real synapses onto Kenyon
+  # cells are genuine FlyWire neurons and connections.
   reward_gain_na: 120.0
   punishment_gain_na: 120.0
   # Time constant of the injected reward current, in ms.
@@ -537,7 +537,7 @@ learning:
   #               TRUE readout is rewarded on the same trial -- a
   #               perceptron-style correction that carries which-class
   #               information the global scalar cannot express. Still gated by
-  #               the real APL/DPM reinforcement-neuron spike gate.
+  #               the real reinforcement-neuron spike gate (DAN for odor-v1).
   credit_assignment: per_class
   # Supervised readout pretraining. The three-factor rule alone does not beat
   # chance on this subcircuit because the Kenyon-cell drive to the readout is
@@ -622,6 +622,21 @@ structural:
     # Intervals a recruit must survive before it may be retired, so newly
     # added neurons get a training window before deletion is possible.
     retirement_min_age: 1
+    # -- Growth-matched controls (reviewer-requested ablations) -----------
+    # Whether a recruit inherits its anchor's category. Set false to break the
+    # label-guided part of recruitment: each recruit is then assigned a category
+    # drawn uniformly at random, so any learning left cannot come from
+    # category inheritance.
+    category_guidance: true
+    # Which readout unit a recruit grows adjacent to. "successful" picks the
+    # rolling-reward argmax; "random" picks a uniform unit and removes the
+    # reward/label signal that steers where growth happens.
+    anchor: successful
+    # Where a recruit's presynaptic sources come from. "anchor" samples adjacent
+    # to the anchor's own inputs (>= divergence different); "random" samples
+    # uniformly from the whole upstream pool, matched in fan-in but with no
+    # relationship to the winning unit.
+    input_source: anchor
   # Rate limits.
   max_prunes_per_interval: 64
   max_silences_per_interval: 8
@@ -687,6 +702,12 @@ evaluation:
   curve_window_trials: 50
   # Held-out evaluation repetitions per word, to reduce response noise.
   eval_repeats: 3
+  # Growth-matched capacity control. Append this many fixed random projections
+  # of the Kenyon-cell spike-count vector as extra decoder features, matching
+  # the number of recruited units a growth-on condition adds. It gives a
+  # no-growth decoder the same extra feature budget as growth, so any accuracy
+  # gain from extra dimensions can be separated from growth itself. 0 disables.
+  extra_random_features: 0
   # Raise a data-leakage warning when shuffled labels beat the higher of
   # chance and the untrained-network floor by this much. The floor guards
   # against flagging a representation that is decodable without any learning.
