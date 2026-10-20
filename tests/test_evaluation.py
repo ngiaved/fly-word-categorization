@@ -229,11 +229,11 @@ def test_shuffled_labels_at_chance_raises_no_warning():
     assert report.leakage_warning is None
 
 
-def test_shuffled_labels_above_chance_but_at_untrained_floor_raises_no_warning():
-    # The recode raises the representation's own decodability: the untrained
-    # network already decodes the label above chance. The shuffled control may
-    # sit above chance for the same reason without leaking anything, so the
-    # warning must compare against the untrained floor, not chance alone.
+def test_shuffled_labels_above_chance_at_untrained_floor_still_warns():
+    # The shuffled-label control is judged on its own terms (a decoder fitted on
+    # randomised labels should be at chance even when the representation is
+    # generically decodable). Sitting at the untrained floor no longer excuses
+    # an above-chance control.
     cfg, dataset = _dataset()
 
     def acc(condition, offset):
@@ -246,10 +246,12 @@ def test_shuffled_labels_above_chance_but_at_untrained_floor_raises_no_warning()
     report = evaluate.aggregate(
         _seed_results(acc), dataset, cfg, metadata={"base_seed": 1000}
     )
-    assert report.leakage_warning is None
+    assert report.leakage_warning is not None
+    assert "permutation" in report.leakage_warning
+    assert report.leakage_permutation_p is not None
 
 
-def test_shuffled_labels_above_untrained_floor_raises_leakage_warning():
+def test_shuffled_labels_above_chance_raises_leakage_warning():
     cfg, dataset = _dataset()
 
     def acc(condition, offset):
@@ -263,7 +265,7 @@ def test_shuffled_labels_above_untrained_floor_raises_leakage_warning():
         _seed_results(acc), dataset, cfg, metadata={"base_seed": 1000}
     )
     assert report.leakage_warning is not None
-    assert "untrained" in report.leakage_warning
+    assert "permutation" in report.leakage_warning
 
 
 def test_decoder_is_fit_on_presented_labels_not_dataset_labels(monkeypatch):
@@ -587,3 +589,53 @@ def test_report_markdown_includes_growth_when_present():
         {"flywire_release": "783", "n_neurons": 1928, "n_edges": 21233},
     )
     assert "## Structural growth" in markdown
+
+def test_holm_adjust_matches_step_down_definition():
+    adjusted = evaluate.holm_adjust([0.01, 0.04, 0.03])
+    # smallest p_1=0.01 -> 3*0.01=0.03; p_2=0.03 -> max(0.03, 2*0.03)=0.06;
+    # p_3=0.04 -> max(0.06, 1*0.04)=0.06.
+    assert np.allclose(adjusted, [0.03, 0.06, 0.06])
+
+
+def test_holm_adjust_treats_non_finite_as_one():
+    adjusted = evaluate.holm_adjust([np.nan, 0.2])
+    assert adjusted.max() <= 1.0
+    assert adjusted[1] <= 1.0
+
+
+def test_sign_flip_permutation_constant_positive_is_significant():
+    values = [0.30] * 10
+    p = evaluate.sign_flip_permutation(values, null=0.25, alternative="greater")
+    # Only the all-positive sign pattern reaches the observed mean.
+    assert p == 1 / 1024
+
+
+def test_sign_flip_permutation_zero_deviation_is_not_significant():
+    values = [0.25] * 10
+    p = evaluate.sign_flip_permutation(values, null=0.25, alternative="greater")
+    assert p == 1.0
+
+
+def test_paired_contrasts_holm_and_zero_difference_are_safe():
+    per_seed = {
+        "a": [0.5, 0.6, 0.55, 0.52, 0.58, 0.61, 0.59, 0.53, 0.57, 0.6],
+        "b": [0.3, 0.4, 0.35, 0.32, 0.38, 0.41, 0.39, 0.33, 0.37, 0.4],
+        "c": [0.3, 0.4, 0.35, 0.32, 0.38, 0.41, 0.39, 0.33, 0.37, 0.4],
+    }
+    contrasts = evaluate.paired_contrasts(
+        per_seed, [("a", "b"), ("b", "c")], level=0.05, seed=7
+    )
+    assert contrasts["a - b"]["wilcoxon_p_holm"] < 0.05
+    assert contrasts["a - b"]["significant_holm"] is True
+    # identical samples: no crash, no significance, p reported as 1.0
+    assert contrasts["b - c"]["wilcoxon_p_value"] == 1.0
+    assert contrasts["b - c"]["significant_holm"] is False
+    assert contrasts["b - c"]["wilcoxon_p_holm"] <= 1.0
+
+
+def test_paired_contrasts_skip_missing_and_singleton_conditions():
+    per_seed = {"a": [0.5, 0.6], "b": [0.3], "c": [0.4, 0.5]}
+    contrasts = evaluate.paired_contrasts(
+        per_seed, [("a", "b"), ("a", "c"), ("a", "missing")], level=0.05
+    )
+    assert set(contrasts) == {"a - c"}

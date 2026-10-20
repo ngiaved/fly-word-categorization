@@ -45,9 +45,9 @@ def _fmt(value: float | None, digits: int = 3) -> str:
 def conditions_table(report: EvaluationReport) -> str:
     """Markdown table of mean accuracy and CI per condition."""
     lines = [
-        "| condition | mean acc | 95% CI | p vs chance | significant | "
+        "| condition | mean acc | 95% CI | p vs chance | p (Holm) | significant | "
         "no-response | online argmax | train acc |",
-        "|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for condition, stats in report.conditions.items():
         label = CONDITION_LABELS.get(condition, condition)
@@ -56,13 +56,33 @@ def conditions_table(report: EvaluationReport) -> str:
             if "ci_low" in stats else "n/a"
         )
         p_value = stats.get("p_value")
+        p_holm = stats.get("wilcoxon_p_holm")
         lines.append(
             f"| {label} | {_fmt(stats.get('mean_accuracy'))} | {ci} | "
             f"{_fmt(p_value, 4) if p_value is not None else 'n/a'} | "
+            f"{_fmt(p_holm, 4) if p_holm is not None else 'n/a'} | "
             f"{'yes' if stats.get('significant') else 'no'} | "
             f"{_fmt(stats.get('no_response_rate_mean'))} | "
             f"{_fmt(stats.get('argmax_test_accuracy_mean'))} | "
             f"{_fmt(stats.get('train_accuracy_mean'))} |"
+        )
+    return "\n".join(lines)
+
+
+def contrasts_table(report: EvaluationReport) -> str:
+    """Markdown table of the pre-specified, Holm-corrected paired contrasts."""
+    if not report.contrasts:
+        return ""
+    lines = [
+        "| contrast | mean Δ | Wilcoxon p | Holm p | significant |",
+        "|---|---|---|---|---|",
+    ]
+    for key, row in report.contrasts.items():
+        lines.append(
+            f"| {key} | {row.get('mean_difference', float('nan')):+.3f} | "
+            f"{_fmt(row.get('wilcoxon_p_value'), 4)} | "
+            f"{_fmt(row.get('wilcoxon_p_holm'), 4)} | "
+            f"{'yes' if row.get('significant_holm') else 'no'} |"
         )
     return "\n".join(lines)
 
@@ -81,6 +101,8 @@ def headline(report: EvaluationReport, main_condition: str = "trained") -> str:
     ci_low = stats.get("ci_low", float("nan"))
     ci_high = stats.get("ci_high", float("nan"))
     p_value = stats.get("p_value", float("nan"))
+    w_value = stats.get("wilcoxon_p_value", float("nan"))
+    p_holm = stats.get("wilcoxon_p_holm")
     level = report.level
     significant = bool(stats.get("significant"))
 
@@ -93,8 +115,12 @@ def headline(report: EvaluationReport, main_condition: str = "trained") -> str:
         f"Across {report.n_seeds} seeds, held-out accuracy for the main condition "
         f"was {mean:.3f} (95% CI [{ci_low:.3f}, {ci_high:.3f}]), which is "
         f"{verdict} at alpha = {level} "
-        f"(one-sample t-test p = {p_value:.4g}; "
-        f"Wilcoxon signed-rank p = {_fmt(stats.get('wilcoxon_p_value'), 4)})."
+        f"(Wilcoxon signed-rank p = {_fmt(w_value, 4)}"
+        + (
+            f", Holm-corrected p = {_fmt(p_holm, 4)}"
+            if p_holm is not None else ""
+        )
+        + f"; one-sample t-test p = {p_value:.4g})."
     )
     if not significant:
         text += (
@@ -305,8 +331,29 @@ def build_markdown(
         "",
         f"Chance level {report.chance:.2f}; significance level "
         f"alpha = {report.level}; {report.n_seeds} seeds; "
-        "confidence intervals are percentile bootstrap over seeds.",
+        "confidence intervals are percentile bootstrap over seeds. Decisions use "
+        "the Wilcoxon signed-rank test; `p (Holm)` is the Holm-corrected value "
+        "across the condition family.",
         "",
+    ]
+    contrasts = contrasts_table(report)
+    if contrasts:
+        lines += [
+            "## Paired contrasts",
+            "",
+            contrasts,
+            "",
+            "Paired per-seed Wilcoxon signed-rank contrasts; `Holm p` corrects "
+            "across the pre-specified contrast family.",
+            "",
+        ]
+    if report.leakage_permutation_p is not None:
+        lines += [
+            f"Shuffled-label leakage check: sign-flip permutation "
+            f"p = {report.leakage_permutation_p:.4g} against chance.",
+            "",
+        ]
+    lines += [
         "## Confusion matrix",
         "",
     ]

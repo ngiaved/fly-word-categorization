@@ -19,7 +19,7 @@ import numpy as np
 
 from .encoding import Dataset, WordItem, make_mapping
 from .learning import NO_RESPONSE, TrialRunner
-from .repro import make_rng
+from .repro import make_rng, seed_everything
 
 LOGGER = logging.getLogger(__name__)
 
@@ -338,10 +338,19 @@ def test_against_chance(
         w_stat, w_p = float(w_result.statistic), float(w_result.pvalue)
     except ValueError:
         w_stat, w_p = float("nan"), float("nan")
+    if not np.isfinite(w_p):
+        # scipy returns nan (with a warning) for an all-zero difference; treat
+        # it as no evidence, not as a poison value for Holm correction.
+        w_p = 1.0
     ci_low, ci_high = bootstrap_ci(
         values, level=ci_level, resamples=ci_resamples, seed=seed
     )
     p_value = float(t_result.pvalue)
+    # The decision uses the Wilcoxon signed-rank test, not the t-test: with the
+    # 10 seeds used here the exact two-sided Wilcoxon floor is 0.002, so a
+    # t-test p-value below that (which the t-test can produce) is not a valid
+    # small-sample claim. The t-test is still reported for continuity.
+    significant = bool(w_p < level and values.mean() > chance)
     return SignificanceResult(
         chance=chance,
         n_seeds=int(values.size),
@@ -354,8 +363,140 @@ def test_against_chance(
         p_value=p_value,
         wilcoxon_statistic=w_stat,
         wilcoxon_p=w_p,
-        significant=bool(p_value < level and values.mean() > chance),
+        significant=significant,
     )
+
+
+def holm_adjust(pvalues: Sequence[float]) -> np.ndarray:
+    """Holm-Bonferroni step-down adjusted p-values.
+
+    Returns one adjusted p per input, in input order. Used for the family of
+    condition-versus-chance tests and the family of paired contrasts so the
+    paper does not report uncorrected p-values as if they were confirmatory.
+    """
+    p = np.asarray(list(pvalues), dtype=np.float64)
+    p = np.where(np.isfinite(p), p, 1.0)
+    n = p.size
+    adjusted = np.empty(n, dtype=np.float64)
+    running = 0.0
+    for rank, index in enumerate(np.argsort(p)):
+        running = max(running, (n - rank) * float(p[index]))
+        adjusted[index] = min(1.0, running)
+    return adjusted
+
+
+def sign_flip_permutation(
+    values: Sequence[float],
+    null: float = 0.0,
+    alternative: str = "greater",
+    n_resamples: int = 10000,
+    seed: int = 0,
+    exact_max: int = 16,
+) -> float:
+    """Randomization (sign-flip) permutation test for a one-sample mean.
+
+    The null hypothesis is that the deviations ``values - null`` are
+    symmetric about zero, i.e. the seed labels carry no information. For
+    ``n <= exact_max`` every one of the ``2**n`` sign patterns is enumerated;
+    otherwise a seeded Monte Carlo sample is used. This is the test the
+    shuffled-label control should be judged by: unlike an untrained-floor
+    comparison it does not assume the floor is a valid null for a control
+    whose decoder was fitted on randomised labels.
+    """
+    dev = np.asarray(list(values), dtype=np.float64) - float(null)
+    n = dev.size
+    if n == 0:
+        return 1.0
+    observed = float(dev.mean())
+
+    if n <= exact_max:
+        masks = np.arange(1 << n, dtype=np.int64)
+        bits = (masks[:, None] >> np.arange(n)) & 1
+        signs = bits.astype(np.float64) * 2.0 - 1.0
+        means = (signs * dev).mean(axis=1)
+    else:
+        rng = make_rng(seed, stream=f"signflip:{n}:{alternative}")
+        signs = rng.choice([-1.0, 1.0], size=(n_resamples, n))
+        means = (signs * dev).mean(axis=1)
+
+    if alternative == "greater":
+        hits = np.count_nonzero(means >= observed - 1e-12)
+    elif alternative == "less":
+        hits = np.count_nonzero(means <= observed + 1e-12)
+    else:
+        hits = np.count_nonzero(np.abs(means) >= abs(observed) - 1e-12)
+    return float(hits / means.size)
+
+
+def paired_contrast(
+    first: Sequence[float],
+    second: Sequence[float],
+    level: float,
+    seed: int = 0,
+    n_resamples: int = 10000,
+) -> dict[str, Any]:
+    """Paired per-seed contrast, with exact Wilcoxon and permutation p-values.
+
+    Two-sided tests are used because a contrast can in principle go either
+    way. At n = 10 the exact two-sided Wilcoxon floor is 0.002, so this is
+    the smallest p a contrast can report.
+    """
+    import scipy.stats as sps
+
+    a = np.asarray(list(first), dtype=np.float64)
+    b = np.asarray(list(second), dtype=np.float64)
+    if a.shape != b.shape:
+        raise EvaluationError("paired contrast requires equal-length samples")
+    diff = a - b
+    try:
+        w_p = float(sps.wilcoxon(diff, zero_method="wilcox").pvalue)
+    except ValueError:
+        w_p = 1.0
+    if not np.isfinite(w_p):
+        w_p = 1.0
+    perm_p = sign_flip_permutation(
+        diff, null=0.0, alternative="two-sided",
+        n_resamples=n_resamples, seed=seed,
+    )
+    return {
+        "n_seeds": int(diff.size),
+        "mean_difference": float(diff.mean()),
+        "wilcoxon_p_value": w_p,
+        "permutation_p_value": perm_p,
+        "significant": bool(w_p < level and diff.mean() != 0.0),
+    }
+
+
+def paired_contrasts(
+    per_seed: dict[str, list[float]],
+    pairs: Sequence[tuple[str, str]],
+    level: float,
+    seed: int = 0,
+) -> dict[str, dict[str, Any]]:
+    """Compute a pre-specified family of paired contrasts with Holm correction."""
+    contrasts: dict[str, dict[str, Any]] = {}
+    keys: list[str] = []
+    for first, second in pairs:
+        if first not in per_seed or second not in per_seed:
+            continue
+        if len(per_seed[first]) != len(per_seed[second]):
+            continue
+        if len(per_seed[first]) < 2:
+            continue
+        key = f"{first} - {second}"
+        contrasts[key] = paired_contrast(
+            per_seed[first], per_seed[second], level=level, seed=seed
+        )
+        keys.append(key)
+    if not keys:
+        return contrasts
+    adjusted = holm_adjust([contrasts[k]["wilcoxon_p_value"] for k in keys])
+    for key, p_adj in zip(keys, adjusted):
+        contrasts[key]["wilcoxon_p_holm"] = float(p_adj)
+        contrasts[key]["significant_holm"] = bool(
+            p_adj < level and contrasts[key]["mean_difference"] != 0.0
+        )
+    return contrasts
 
 
 # --------------------------------------------------------------------------
@@ -514,6 +655,16 @@ def run_condition(
     """
     from .network import build_network
     from .structural import StructuralPlasticity
+
+    # Reset Python/NumPy/Brian2 global RNGs to the SAME seed for every
+    # condition. Previously ``seed_everything`` ran once per seed in the CLI, so
+    # the global state (Brian2 noise, Python random) advanced across conditions:
+    # ``trained`` and ``structural_off`` share a config but produced different
+    # accuracies, and a condition's absolute number depended on its run order.
+    # Seeding here gives each condition a fresh, identical random state (common
+    # random numbers), so identical configs are bit-identical and paired
+    # contrasts isolate the factor under test instead of run order.
+    seed_everything(seed)
 
     run_config, settings = condition_config(config, condition)
     network = build_network(subcircuit, run_config, weight_scale=weight_scale)
@@ -694,6 +845,49 @@ def run_condition(
     )
 
 
+def _stimulus_diagnostics(runner, split: Split, config) -> dict[str, Any]:
+    """Evoked versus spontaneous rates and Kenyon-cell activity sparseness.
+
+    The paper's localisation argument needs these numbers: a gain-1 failure is
+    only attributable to the transform (rather than to stimulus drive being
+    swamped by spontaneous noise) if the evoked Kenyon-cell rate is comparable
+    to the spontaneous rate and the code is dense. This records both, plus the
+    fraction of Kenyon cells active during a stimulus window, so the SNR
+    confound can be read directly from the archived run.
+    """
+    import brian2 as b2
+
+    from .encoding import trial_timing
+
+    timing = trial_timing(config)
+    # Spontaneous: no stimulus, a rest-length window, same monitor protocol.
+    runner._clear_stimulus()
+    base = runner.snapshot_counts()
+    runner.network.brian.run(timing.rest_ms * b2.ms)
+    spontaneous = runner.stage_rates_hz(timing.rest_ms, base)
+    runner.reset_state()
+
+    per_category: dict[str, Any] = {}
+    for category in sorted({int(item.label) for item in split.train}):
+        item = next(i for i in split.train if int(i.label) == category)
+        runner.run_trial(item.word, item.label, 600_000 + category, learn=False)
+        window = runner.last_window or {}
+        kc = np.asarray(window.get("mushroom_body", []), dtype=np.float64)
+        active = int(np.count_nonzero(kc > 0))
+        per_category[str(category)] = {
+            "word": item.word,
+            "evoked_rate_hz": dict(runner.last_stimulus_rates),
+            "kc_active_fraction": float(active / kc.size) if kc.size else 0.0,
+            "kc_spikes_per_active": (
+                float(kc[kc > 0].mean()) if active else 0.0
+            ),
+        }
+    return {
+        "spontaneous_rate_hz": spontaneous,
+        "per_category": per_category,
+    }
+
+
 def representation_probes(
     subcircuit,
     config,
@@ -720,6 +914,9 @@ def representation_probes(
     from .learning import decoder_predict, fit_readout_decoder
     from .network import build_network
 
+    # Same reasoning as run_condition: give the probe a fresh, deterministic
+    # random state so it cannot depend on how many conditions ran before it.
+    seed_everything(seed)
     network = build_network(subcircuit, config, weight_scale=weight_scale)
     input_count = len(subcircuit.roles[list(subcircuit.roles)[0]])
     mapping = make_mapping(config, seed=seed, n_inputs=input_count, dataset=dataset)
@@ -821,6 +1018,9 @@ def representation_probes(
             entry["test_accuracy"] = float("nan")
             entry["cv_accuracy"] = float("nan")
         result[key] = entry
+    # Diagnostic entries deliberately carry no ``test_accuracy``, so the probe
+    # aggregator skips them while the per-seed JSON keeps the raw rates.
+    result["diagnostics"] = _stimulus_diagnostics(runner, split, config)
     return result
 
 
@@ -849,6 +1049,8 @@ class EvaluationReport:
     metadata: dict[str, Any]
     probes: dict[str, Any] = field(default_factory=dict)
     positive_control: dict[str, Any] = field(default_factory=dict)
+    contrasts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    leakage_permutation_p: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -857,7 +1059,9 @@ class EvaluationReport:
             "n_seeds": self.n_seeds,
             "conditions": self.conditions,
             "per_seed_test_accuracy": self.per_seed,
+            "contrasts": self.contrasts,
             "data_leakage_warning": self.leakage_warning,
+            "data_leakage_permutation_p": self.leakage_permutation_p,
             "splits": self.splits,
             "metadata": self.metadata,
             "probes": self.probes,
@@ -1021,17 +1225,18 @@ def aggregate(
 ) -> EvaluationReport:
     """Aggregate per-seed results into the reported statistics.
 
-    A data-leakage warning is raised when the shuffled-label control beats
-    the higher of chance and the untrained-network floor by more than the
-    configured margin, since that would mean the evaluation pipeline itself
-    leaks label information. Comparing against the untrained floor matters
-    when the representation itself is decodable without any learning: an
-    untrained network can sit well above chance, and the shuffled control
-    should be no more decodable than that.
+    Condition-versus-chance decisions use the Wilcoxon signed-rank test and are
+    Holm-corrected across the condition family. Paired contrasts are computed
+    for a pre-specified family and Holm-corrected across that family.
+
+    A data-leakage warning is raised when the shuffled-label control is above
+    chance by a sign-flip permutation test. The untrained floor is *reported*
+    alongside it but is not used as the null: a decoder fitted on randomised
+    labels should be at chance even when the representation is generically
+    decodable, so "it matches the untrained floor" is not an exoneration.
     """
     chance = float(config.get("evaluation.chance_level"))
     level = float(config.get("evaluation.significance_level"))
-    margin = float(config.get("evaluation.leakage_margin"))
 
     per_seed: dict[str, list[float]] = {}
     conditions: dict[str, dict[str, Any]] = {}
@@ -1085,27 +1290,67 @@ def aggregate(
         stats["n_seeds"] = len(accuracies)
         conditions[condition] = stats
 
+    # Holm correction across the condition-versus-chance family. The decision
+    # test is the Wilcoxon signed-rank test (see test_against_chance); the
+    # t-test p-value is retained only as a descriptive secondary statistic.
+    tested = [c for c, s in conditions.items() if "wilcoxon_p_value" in s]
+    if tested:
+        adjusted = holm_adjust([conditions[c]["wilcoxon_p_value"] for c in tested])
+        for condition, p_adj in zip(tested, adjusted):
+            conditions[condition]["wilcoxon_p_holm"] = float(p_adj)
+            conditions[condition]["significant_holm"] = bool(
+                p_adj < level
+                and float(conditions[condition].get("mean_accuracy", 0.0)) > chance
+            )
+
     leakage_warning = None
+    leakage_p: float | None = None
     shuffled = per_seed.get("shuffled_labels")
     if shuffled:
         shuffled_mean = float(np.mean(shuffled))
-        untrained = per_seed.get("untrained")
-        floor = chance
-        floor_label = f"{chance:.2f} chance level"
-        if untrained:
-            untrained_mean = float(np.mean(untrained))
-            floor = max(chance, untrained_mean)
-            floor_label = (
-                f"{chance:.2f} chance level and the {untrained_mean:.3f} "
-                f"untrained-network floor"
-            )
-        if shuffled_mean > floor + margin:
+        # Judge the shuffled-label control on its own terms: a sign-flip
+        # permutation test against chance. The earlier "higher of chance and the
+        # untrained floor" rule silently excused a control that was above chance
+        # whenever the representation was generically decodable, which is not a
+        # valid null for a decoder fitted on randomised labels.
+        leakage_p = sign_flip_permutation(
+            shuffled,
+            null=chance,
+            alternative="greater",
+            seed=(metadata or {}).get("base_seed", 0),
+        )
+        note = ""
+        if "untrained" in per_seed:
+            note = f" (untrained floor {np.mean(per_seed['untrained']):.3f})"
+        if leakage_p < level and shuffled_mean > chance:
             leakage_warning = (
-                f"shuffled-label control reached {shuffled_mean:.3f}, above the "
-                f"{floor_label} by more than the configured margin "
-                f"{margin:.2f}; the evaluation pipeline may leak label information"
+                f"shuffled-label control reached {shuffled_mean:.3f} vs "
+                f"{chance:.2f} chance{note}; sign-flip permutation "
+                f"p = {leakage_p:.4g} < alpha = {level:.2f}. The control is "
+                f"above chance on its own terms; this is reported as residual "
+                f"label information, not excused by the untrained floor."
             )
             LOGGER.warning("%s", leakage_warning)
+
+    # Pre-specified family of paired contrasts. Holm correction is applied
+    # across this family so a paper table cannot cherry-pick an uncorrected p.
+    contrast_pairs = [
+        ("trained", "untrained"),
+        ("structural_on", "structural_off"),
+        ("structural_on", "trained"),
+        ("structural_on", "structural_unguided"),
+        ("structural_on", "structural_random_category"),
+        ("structural_on", "dopamine_off"),
+        ("dopamine_off", "dopamine_off_no_growth"),
+        ("trained", "trained_extra_features"),
+        ("trained", "structural_off"),
+        ("trained_pretrained", "untrained"),
+        ("shuffled_labels", "untrained"),
+    ]
+    contrasts = paired_contrasts(
+        per_seed, contrast_pairs, level=level,
+        seed=(metadata or {}).get("base_seed", 0),
+    )
 
     probes, positive_control = _aggregate_probes(seed_results, chance, config)
     if positive_control.get("passed") is False:
@@ -1122,6 +1367,8 @@ def aggregate(
         metadata=metadata or {},
         probes=probes,
         positive_control=positive_control,
+        contrasts=contrasts,
+        leakage_permutation_p=leakage_p,
     )
 
 

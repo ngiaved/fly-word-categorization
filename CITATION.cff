@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use this software or the archived results, please cite it as below."
+title: "FlyWord: dopamine-gated plasticity in a FlyWire mushroom-body subcircuit"
+abstract: >-
+  A Brian2 model of a real FlyWire (release 783) olfactory subcircuit
+  (ALPN -> Kenyon cell -> MBON with DAN reinforcement). The work reports a
+  diagnostic recode of the ALPN -> Kenyon-cell transform, which restores a
+  decodable Kenyon-cell category code but does not restore the online
+  MBON-argmax readout, and growth-matched controls showing that structural
+  growth is a decoder-capacity effect rather than a learned prototype.
+authors:
+  - family-names: "Giavedoni"
+    given-names: "Nicolas"
+date-released: "2026-10-19"
+license: MIT
+repository-code: "https://github.com/ngiaved/fly-word-categorization"
+url: "https://github.com/ngiaved/fly-word-categorization"
+keywords:
+  - Drosophila
+  - connectome
+  - FlyWire
+  - mushroom body
+  - Kenyon cells
+  - dopamine
+  - structural plasticity
+  - computational neuroscience
+preferred-citation:
+  type: article
+  title: >-
+    Necessary but not sufficient: recoding the ALPN->Kenyon-cell transform
+    restores a category code that the mushroom-body readout does not learn
+  authors:
+    - family-names: "Giavedoni"
+      given-names: "Nicolas"
+  year: 2026
+  month: 10
+  notes: >-
+    Manuscript in docs/paper.md. Archived run artifacts are not committed to the
+    repository; a Zenodo DOI will be added when the deposit is published.

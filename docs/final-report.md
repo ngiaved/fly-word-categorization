@@ -11,27 +11,37 @@ without reframing:
    real antennal-lobe projection neurons (ALPN) → Kenyon cell → MBON chain.
    This is now the default configuration.
 
-> **Superseded in part.** This report documents the nulls at the calibrated
-> operating point. The negative finding was followed by a *recode* experiment:
-> raising the `ALPN → Kenyon cell` gain (with a widened calibration ceiling)
-> restores a decodable Kenyon-cell class code and a post-hoc supervised decoder
-> then recovers the task (held-out 0.363 at gain 20, 0.418 at gain 50, up to 0.833
-> with structural growth on the main recode run). Those are the current results;
-> see [current-state.md](current-state.md), [paper.md](paper.md), and
+> **Historical document, superseded in part.** This report documents the nulls at
+> the calibrated operating point. The negative finding was followed by a *recode*
+> experiment: raising the `ALPN → Kenyon cell` gain (with a widened calibration
+> ceiling) restores a decodable Kenyon-cell class code (probe CV 0.950 at gain 20,
+> 1.000 at gain 50). **Restoring the code does not restore the online learner**:
+> the MBON-argmax readout stays at chance (0.235–0.272) in every condition
+> measured, so the recode is necessary, not sufficient. The post-hoc supervised
+> decoder does rise (0.363 at gain 20, 0.418 at gain 50; up to 0.833 with
+> structural growth), but the trained condition is not significantly above the
+> untrained floor after Holm correction (+0.025, *p* = 1.0; +0.088, *p* = 0.117).
+> See [current-state.md](current-state.md), [paper.md](paper.md), and
 > `runs/recode-v2-merged`, `runs/recode-50-v2-merged`.
 >
 > The recode is a diagnostic intervention outside the physiological band, and the
-> growth-matched controls have now been **run** (`runs/recode-50-controls-merged`,
-> 10 seeds): structural growth still beats no-growth (`structural_on` 0.750 vs
-> `trained` 0.418, *p* = 0.002), but the gain is unchanged when all label guidance
-> is removed (`structural_unguided` 0.785, *p* = 0.75) or category inheritance is
-> broken (`structural_random_category` 0.707, *p* = 0.61), and a **no-growth
-> decoder given 300 random Kenyon-cell projections reaches 0.983**, above every
-> growth condition. So the growth effect is a decoder-capacity effect, not a
-> learned, label-guided prototype; the dopamine rule remains non-contributory
-> (`dopamine_off` 0.828 vs `structural_on` 0.750, *p* = 0.084); and the online
-> MBON-argmax readout stays at chance throughout, so none of this is online
-> learning.
+> growth-matched controls have been **run** (`runs/recode-50-controls-merged`,
+> 10 seeds): structural growth still beats no-growth under the supervised decoder
+> (`structural_on` 0.750 vs `trained` 0.418, Holm *p* = 0.018), but the gain is
+> unchanged when all label guidance is removed (`structural_unguided` 0.785, Holm
+> *p* = 1.0) or category inheritance is broken
+> (`structural_random_category` 0.707, Holm *p* = 1.0), and a **no-growth decoder
+> given 300 random Kenyon-cell projections reaches 0.983**, above every growth
+> condition (Holm *p* = 0.018). So the growth effect is a decoder-capacity effect,
+> not a learned, label-guided prototype. Dopamine has no detectable effect on
+> decoded accuracy (`dopamine_off` 0.828 vs `structural_on` 0.750, Holm
+> *p* = 0.34), but that is a null about a refitted decoder, not evidence that
+> plasticity is absent. The online MBON-argmax readout stays at chance throughout,
+> so none of this is online learning.
+>
+> **All archived numbers predate the per-condition RNG-isolation fix**; under the
+> fix, `trained` and `structural_off` (identical configs) are bit-identical.
+> Interpret internally paired contrasts only; absolute values are provisional.
 
 **Neither task produced significant learning in the real evaluation pipeline.**
 The visual task is a documented negative result. The odor task removes every
@@ -41,9 +51,12 @@ stays at chance. **Positive controls resolve that null into a precise
 statement** (Section [Positive controls](#positive-controls-where-the-odor-signal-is-lost-confirmed)):
 the category is perfectly decodable at the stimulus (input probe 1.000), a
 supervised decoder memorises the Kenyon-cell presentations outright, and yet the
-Kenyon-cell population carries no generalisable class code (probe 0.255/0.227) —
-so the label is lost at the `ALPN → Kenyon cell` transform, before the plastic
-readout has anything to learn.
+Kenyon-cell population carries no generalisable class code (CV 0.236; held-out
+0.255 and 0.227) — so the label is lost at the `ALPN → Kenyon cell` transform,
+before the plastic readout has anything to learn. **The recode shows this is a
+bottleneck, not the only one:** restoring the transform lifts the Kenyon-cell
+probe to 0.950–1.000 but leaves the online readout at chance, so the readout and
+its credit rule are a second, unresolved failure.
 
 ## Headline
 
@@ -84,10 +97,13 @@ counts between the specified stages, over *all* candidate neurons in release
 
 Kenyon cells receive input **only** from other Kenyon cells (379 k synapses),
 from the `MBIN` class (216 k), and from `DAN` neurons (59 k). There is
-essentially no optic-lobe input to the mushroom body. This is real biology,
-not a bug in the annotation filters: **the mushroom body is not a visual target
-in *Drosophila*.** It is driven by the antennal lobe and by reinforcement
-neurons.
+essentially no optic-lobe input to the mushroom body **through the stages defined
+here**. This is real biology, not a bug in the annotation filters: this stage
+definition contains **no direct optic-lobe → Kenyon-cell pathway**. It is
+narrower than saying the mushroom body is not a visual target: visual projection
+neurons do innervate the mushroom-body calyx (Vogt et al., 2016; Li et al.,
+2020), but they are not part of the photoreceptor → lamina → medulla → lobula
+chain modelled here.
 
 The visual task therefore had to synthesise two connections — a
 `lobula → Kenyon cell` bridge and a dense `mushroom body → output` readout —
@@ -241,7 +257,8 @@ supervised-pretrained readout condition, and a separable-task configuration
 | `runs/pctrl-v1-merged` | `configs/default.yaml` | probes, gate, pretrained, default task |
 | `runs/pctrl-sep-merged` | `configs/odor-separable.yaml` | same, on trivially separable classes |
 
-**Probes, 10 seeds, chance 0.25 (held-out accuracy on unseen words):**
+**Probes, 10 seeds, chance 0.25 (held-out accuracy on unseen tokens; CV is
+k-fold cross-validation over training presentations):**
 
 | task | stage | features | train | CV | held-out | 95 % CI |
 |---|---|---|---|---|---|---|
@@ -257,24 +274,28 @@ accuracy of 1.000 (the decoder memorises but has no class structure to
 generalise), with cross-validation agreeing. **The gate fails in both runs** with
 the same diagnosis:
 
-> input probe passes but the Kenyon-cell probe 0.255 is not above chance+0.05:
-> the label signal is lost before the plastic readout (upstream bottleneck).
+> input probe passes but the Kenyon-cell probe (CV 0.236) is not above
+> chance+0.05: the label signal is lost before the plastic readout.
 
-**Supervised pretraining does not help:** `trained_pretrained` fits the readout
-to train accuracy 1.000 on every seed, yet held-out is 0.268 (default) and
+**Supervised pretraining does not help at gain 1:** `trained_pretrained` fits the
+readout to train accuracy 1.000 on every seed, yet held-out is 0.268 (default) and
 0.235 (separable) — at chance and no better than plain `trained` (0.262, 0.248).
-The bottleneck is not readout capacity or initialisation.
+At gain 1 the bottleneck is the absent Kenyon-cell code, not readout
+initialisation. **This does not generalise to the recoded regime:** after the
+recode the Kenyon-cell probe is ≈ 1.000 and the four-dimensional readout is the
+limiting factor (300 extra features reach 0.983), while the online readout stays
+at chance. The readout is therefore not exonerated as a second bottleneck — only
+as the *first* cause at gain 1.
 
 **Not task difficulty:** on the separable task the class structure is trivial
 (probe 1.000) and still nothing learns, so overlap is not the cause.
 
 **Location of the loss, refined.** Earlier this report floated the
 `mushroom body → output` readout/credit rule as the bottleneck. The probes move
-the blame upstream: the readout — probe decoder, fitted decoder, and
-supervised-pretrained decoder alike — is a valid instrument, and each memorises
-the Kenyon-cell features; the class information is absent from the
+the first cause upstream: the class information is absent from the
 **`ALPN → Kenyon cell` code** the readout would have to amplify. The plasticity
-rule and credit assignment are exonerated as the *first* cause.
+rule and credit assignment are not the *first* cause; the recode shows they remain
+a second failure once the code is restored.
 
 Full per-condition tables are in the archived `report.md` of each merged run.
 
@@ -404,38 +425,38 @@ A regression test (`test_decoder_is_fit_on_presented_labels_not_dataset_labels`)
 reproduces the leak and guards it, and the smoke pipeline now puts the shuffled
 control at exactly chance (0.250, no warning).
 
-**Residual floor and the leakage margin.** Under the fixed harness `recode-v2`
-puts the shuffled control at **0.330**, down from 0.615 but still above the raw
-chance level. Crucially it is indistinguishable from the untrained network
-(**0.338**), which is the point: the recode lifts the *representation's own*
-decodability (the Kenyon-cell probe reaches 0.958), so even a no-learning network
-sits above chance and the shuffled control inherits that floor. The leakage check
-now compares the shuffled control against the higher of chance and the untrained
-floor (`evaluate.aggregate`), not chance alone, so a generically decodable
-representation no longer reads as leakage. A new `shuffled_labels_no_growth`
-condition answers the remaining question — whether structural recruitment, whose
-category guidance uses the network's own predictions, contributes any of it — in
-the negative: with growth switched off the shuffled control falls to or below
-chance (**0.230** at gain 20, **0.233** at gain 50; Shannon chance 0.25;
-`runs/recode-v2-extra-merged`, `runs/recode-50-extra-merged`; no warning).
+**Residual floor and the leakage test (corrected in revision).** Under the fixed
+harness `recode-v2` puts the shuffled control at **0.330**, down from 0.615 but
+still above raw chance. The earlier draft excused this because it is
+indistinguishable from the untrained network (**0.338**) and changed the leakage
+rule to compare against the higher of chance and the untrained floor. That is a
+goalpost move after the control failed, and it has been removed: the control is
+now tested against chance by a sign-flip permutation test. Under that test the
+gain-20 shuffled control is **above chance (0.330, *p* = 0.020)** while the
+gain-50 control is at chance (0.245, *p* = 0.56). The no-growth isolation controls
+are at or below chance (**0.230** at gain 20, *p* = 0.76; **0.233** at gain 50,
+*p* = 0.73; `runs/recode-v2-extra-merged`, `runs/recode-50-extra-merged`), so the
+pattern is consistent with growth adding generically decodable features rather
+than with label leakage. It remains a residual anomaly, not an exculpation.
 
-**Mechanism isolation.** `recode-v1` also showed that accuracy tracks *structural
-growth*, not dopamine: `dopamine_off` (growth on) 0.597 and `structural_on` 0.618
-both far exceed `trained` (growth off) 0.363, while the Kenyon-cell probe is high
-regardless. A new condition `dopamine_off_no_growth` completes the dopamine ×
-growth 2×2 so each mechanism can be read off against its own control.
+**Mechanism isolation.** `recode-v1` also showed that decoded accuracy tracks
+*structural growth*, not dopamine: `dopamine_off` (growth on) 0.597 and
+`structural_on` 0.618 both far exceed `trained` (growth off) 0.363, while the
+Kenyon-cell probe is high regardless. A new condition `dopamine_off_no_growth`
+completes the dopamine × growth 2×2 so each mechanism can be read off against its
+own control. This is a statement about the supervised decoder; the online readout
+stays at chance.
 
 **Results.** Both fixed-harness runs are complete — `recode-v2-merged` (gain 20,
 `configs/odor-recode.yaml`) and `recode-50-v2-merged` (gain 50,
 `configs/odor-recode-50.yaml`), 10 seeds each. Both pass the positive-control gate
-(input probe 1.000; Kenyon-cell probe **0.950** at gain 20, **1.000** at gain 50)
-and carry no leakage warning under the untrained-relative check. Held-out accuracy
-(mean, chance 0.25):
+(input probe 1.000; Kenyon-cell probe CV **0.950** at gain 20, **1.000** at gain
+50). Held-out decoder accuracy (mean, chance 0.25):
 
 | condition | gain 20 | gain 50 |
 | --- | --- | --- |
 | untrained | 0.338 | 0.330 |
-| trained | **0.363** | **0.418** |
+| trained | 0.363 | 0.418 |
 | shuffled_labels | 0.330 | 0.245 |
 | shuffled_labels_no_growth | 0.230 | 0.233 |
 | dopamine_off | 0.597 | 0.785 |
@@ -444,15 +465,22 @@ and carry no leakage warning under the untrained-relative check. Held-out accura
 | structural_on | **0.608** | **0.833** |
 | structural_off | 0.370 | 0.435 |
 
-The recode is not marginal: at gain 50 `structural_on` reaches **0.833** and
-`dopamine_off` **0.785**, and every growth-on condition improves over its gain-20
-value. Accuracy scales with how much structural recruitment a condition permits —
-with growth off (`trained`, `structural_off`, `dopamine_off_no_growth`) it
-collapses toward the untrained floor, while `structural_on` sits far above
-`structural_off` (0.608 vs 0.370; 0.833 vs 0.435). The shuffled control stays at or
-below the untrained floor (0.330 / 0.245 vs 0.338 / 0.330) and is not significant,
-and the no-growth isolation control is at/below chance, so the residual is
-structural, not label leakage. The `recode-v1` shuffled row is superseded.
+The large numbers are real under the supervised decoder, but they are **not
+evidence of learning**. After Holm correction the trained condition is not above
+the untrained floor (gain 20 +0.025, *p* = 1.0; gain 50 +0.088, *p* = 0.117). The
+supervised decoder nonetheless scales with structural recruitment: with growth off
+(`trained`, `structural_off`, `dopamine_off_no_growth`) it collapses toward the
+untrained floor, while `structural_on` sits far above `structural_off` (+0.238 /
++0.398, Holm *p* = 0.016). The growth-matched controls demote this to decoder
+capacity (Section [Interpretation](#interpretation)). The gain-20 shuffled control
+is above chance under the permutation test and is reported as an anomaly, not
+explained away. The `recode-v1` shuffled row is superseded.
+
+**Archival caveat.** All numbers above predate the per-condition RNG-isolation
+fix. Under the fix, `trained` and `structural_off` (identical configs) are
+bit-identical; the archived differences between them are run-order noise. Only
+internally paired contrasts are interpreted, and absolute accuracies are
+provisional pending the re-run.
 
 ---
 
@@ -463,41 +491,52 @@ background dc 0), the visual network — real connectivity plus the documented
 synthetic bridge — does not transfer a decodable word-class signal to its
 readout. The pivot to the real olfactory pathway removes the synthetic bridge
 and readout and gives the stimulus genuine category structure, yet the formal
-runs still fail to learn. Positive controls then localise the common cause: the
-input stage decodes the category perfectly (probe 1.000), the readout is a
-valid instrument, and the Kenyon-cell population decodes at chance under the
-same instrument. The bottleneck is therefore the **`ALPN → Kenyon cell`
-transform** — the code the readout would have to amplify does not linearly
-carry the label — not the input encoding, the missing optic-lobe route, the
-plastic `mushroom body → output` readout, or its credit rule. This is reported
-as a negative result without reframing, as the evaluation spec requires. The
-recode follow-up above shows the diagnosis is actionable: raising the transform's
-gain makes the same harness learn (`structural_on` **0.833** at gain 50),
-confirming the bottleneck was the transform rather than the readout or its credit
-rule.
+runs still fail to learn. Positive controls localise the *first* cause: the
+input stage decodes the category perfectly (probe 1.000), while the Kenyon-cell
+population decodes at chance (CV 0.236) under the same instrument. The first
+bottleneck is therefore the **`ALPN → Kenyon cell` transform** in this calibrated
+regime, not the input encoding or the missing optic-lobe route. That much is
+reported as a negative result without reframing.
+
+The recode follow-up shows the diagnosis is actionable but **not sufficient**.
+Raising the transform's gain restores the Kenyon-cell code (CV 0.950–1.000) and
+raises the supervised decoder (growth-on **0.833** at gain 50), yet the online
+MBON-argmax readout stays at chance in every condition measured. The readout and
+its credit rule are therefore a **second, unresolved bottleneck**; the earlier
+claim that the recode "makes the network learn" is withdrawn. The large growth
+numbers are further demoted by the matched controls: they are a decoder-capacity
+effect, not a learned prototype.
+
+All archived numbers predate the per-condition RNG-isolation fix (Section
+[Recode follow-up](#recode-follow-up-decoder-fit-leakage-and-the-harness-fix)).
+Under the fix, identical configurations are bit-identical. Interpret only
+internally paired contrasts; absolute values are provisional.
 
 ## What would need to change to revisit it
 
-- **Recode the `ALPN → Kenyon cell` stage — now tested and positive.** The probes
-  put the failure here: the stimulus decodes at 1.000 and the readout is a working
-  instrument, but the Kenyon-cell population does not carry the class. Raising the
-  transform's gain (and the readout gain) does make the network learn — see the
-  recode follow-up above (`runs/recode-50-v2-merged`: `structural_on` 0.833,
-  `dopamine_off` 0.785, Kenyon-cell probe 1.000, no leakage warning). Denser or
-  sparser Kenyon-cell representations, input scaling, and non-linear decoding
-  remain open variants to sweep.
-- **A reward-prediction-error baseline** for the per-class credit rule, so mean
-  dopamine is not dominated by the ≈75 % wrong-at-chance surplus (relevant once
-  a class code exists to learn).
+- **Re-run the sweep with RNG isolation and the new diagnostics.** The
+  per-condition seeding fix makes identical configurations comparable, and the
+  probe diagnostics (spontaneous vs evoked Kenyon-cell rates, activity
+  sparseness) separate a transform failure from a signal-to-noise failure at gain
+  1. This is the first requirement before publishing absolute accuracies.
+- **Treat the readout/credit rule as a co-equal bottleneck.** After the recode the
+  Kenyon-cell code is decodable (probe ≈ 1.000) while the online argmax is at
+  chance, so an online-learning benchmark is needed. A reward-prediction-error
+  baseline (`learning.rpe_per_class` on `feat/online-readout-rpe`) removes the
+  ≈75 % wrong-at-chance surplus that swamps the per-class credit rule; it must be
+  run on the main sweep before any claim that the circuit learns.
+- **A 4-dimensional MBON readout is the binding decoder constraint.** The
+  no-growth 300-random-feature control reaches 0.983; any hypothesis about
+  growth, dopamine, or the transform must be evaluated against that capacity
+  reference.
 - **Simulate the real `DAN → mushroom body` edges** (reorder stages so
   `reinforcement` precedes `mushroom_body`) instead of the global-scalar
   surrogate, so the teacher flows through real synapses.
-- Supervised pretraining (`learning.pretrain`) is now **tested and negative**:
-  it fits the Kenyon-cell features to 1.000 yet generalises at chance, closing
-  an earlier open item.
-- Adding seeds will not change the result: the formal ≥ 10-seed runs
-  (`runs/odor-v1-merged`, `runs/pctrl-v1-merged`, `runs/pctrl-sep-merged`) all
-  exclude under-powering.
+- **Resolve the `trained_pretrained` anomaly.** Supervised pretraining is negative
+  at gain 1 (it fits the Kenyon-cell features to 1.000 yet generalises at chance),
+  but the condition is 0.512 at gain 20 and 0.340 at gain 50 and is
+  under-specified. The previously reported 0.351 online argmax is not in any
+  archived result and is withdrawn.
 
 ## Reproducing
 

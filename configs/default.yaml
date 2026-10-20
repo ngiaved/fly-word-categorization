@@ -691,8 +691,12 @@ evaluation:
   # Number of independent seeds. Minimum 10 per the evaluation spec.
   n_seeds: 10
   base_seed: 1000
-  # Two-sided significance level for the one-sample test against chance.
-  significance_level: 0.01
+  # Significance level used for every confirmatory decision. The same value is
+  # used for condition-versus-chance tests (Wilcoxon, Holm-corrected across the
+  # condition family) and paired contrasts (Wilcoxon, Holm-corrected across the
+  # pre-specified contrast family). 0.05 was chosen for consistency; archived
+  # runs produced at 0.01 are re-read under this single scheme in the paper.
+  significance_level: 0.05
   # Bootstrap resamples for the confidence interval.
   ci_resamples: 10000
   ci_level: 0.95
@@ -708,9 +712,12 @@ evaluation:
   # no-growth decoder the same extra feature budget as growth, so any accuracy
   # gain from extra dimensions can be separated from growth itself. 0 disables.
   extra_random_features: 0
-  # Raise a data-leakage warning when shuffled labels beat the higher of
-  # chance and the untrained-network floor by this much. The floor guards
-  # against flagging a representation that is decodable without any learning.
+  # Deprecated threshold retained so archived configs still load. Leakage is now
+  # decided by a sign-flip permutation test of the shuffled-label control against
+  # chance (see evaluate.aggregate), not by a margin above the untrained floor:
+  # a decoder fitted on randomised labels should be at chance even when the
+  # representation is decodable, so matching the untrained floor is not an
+  # exoneration.
   leakage_margin: 0.05
   # Positive-control probes: linear decodability of the label from the input
   # stage and from the Kenyon-cell representation, on the fixed untrained
