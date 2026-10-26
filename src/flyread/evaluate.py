@@ -30,6 +30,20 @@ CONDITIONS: dict[str, dict[str, Any]] = {
     # differs from structural_on only by the growth mechanism (previously both
     # fell back to the config's structural.enabled, making them identical).
     "trained": {"trained": True, "structural": False},
+    # Online / RPE condition. Same no-growth pipeline and per-output credit as
+    # `trained`, but the per-class valence is gated by the reward prediction
+    # error (magnitude = |reward - running expectation|), so expected outcomes
+    # stop teaching and only surprising ones move the readout. This is the
+    # condition that tests whether the plastic readout itself can learn online
+    # (read from the network's own winner-take-most spikes, not a refit decoder).
+    "online_rpe": {
+        "trained": True,
+        "structural": False,
+        "overrides": [
+            "learning.credit_assignment=per_class",
+            "learning.rpe_per_class=true",
+        ],
+    },
     "shuffled_labels": {"trained": True, "shuffle_labels": True},
     # Isolation control: shuffled labels AND growth off. If the shuffled
     # control sits above the no-learning floor, comparing this against
