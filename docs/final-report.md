@@ -14,34 +14,37 @@ without reframing:
 > **Historical document, superseded in part.** This report documents the nulls at
 > the calibrated operating point. The negative finding was followed by a *recode*
 > experiment: raising the `ALPN → Kenyon cell` gain (with a widened calibration
-> ceiling) restores a decodable Kenyon-cell class code (probe CV 0.950 at gain 20,
+> ceiling) restores a decodable Kenyon-cell class code (probe CV 0.956 at gain 20,
 > 1.000 at gain 50). **Restoring the code does not restore the online learner**:
-> the MBON-argmax readout stays at chance (0.235–0.272) in every condition
-> measured, so the recode is necessary, not sufficient. The post-hoc supervised
-> decoder does rise (0.363 at gain 20, 0.418 at gain 50; up to 0.833 with
-> structural growth), but the trained condition is not significantly above the
-> untrained floor after Holm correction (+0.025, *p* = 1.0; +0.088, *p* = 0.117).
-> See [current-state.md](current-state.md), [paper.md](paper.md), and
-> `runs/recode-v2-merged`, `runs/recode-50-v2-merged`.
+> the MBON-argmax readout stays at chance (0.232–0.250 in the main runs;
+> 0.245–0.268 across the growth controls), so the recode is necessary, not
+> sufficient. The post-hoc supervised decoder does rise (0.383 at gain 20, 0.400
+> at gain 50; up to 0.813 with structural growth), but the trained condition is
+> not significantly above its paired untrained floor (+0.045, Holm *p* = 1.0;
+> +0.070, Holm *p* = 0.39). See [current-state.md](current-state.md),
+> [paper.md](paper.md), and `runs/recode-v2-rng-merged`,
+> `runs/recode-50-v2-rng-merged`.
 >
 > The recode is a diagnostic intervention outside the physiological band, and the
-> growth-matched controls have been **run** (`runs/recode-50-controls-merged`,
-> 10 seeds): structural growth still beats no-growth under the supervised decoder
-> (`structural_on` 0.750 vs `trained` 0.418, Holm *p* = 0.018), but the gain is
-> unchanged when all label guidance is removed (`structural_unguided` 0.785, Holm
-> *p* = 1.0) or category inheritance is broken
-> (`structural_random_category` 0.707, Holm *p* = 1.0), and a **no-growth decoder
-> given 300 random Kenyon-cell projections reaches 0.983**, above every growth
-> condition (Holm *p* = 0.018). So the growth effect is a decoder-capacity effect,
-> not a learned, label-guided prototype. Dopamine has no detectable effect on
-> decoded accuracy (`dopamine_off` 0.828 vs `structural_on` 0.750, Holm
-> *p* = 0.34), but that is a null about a refitted decoder, not evidence that
-> plasticity is absent. The online MBON-argmax readout stays at chance throughout,
-> so none of this is online learning.
+> growth-matched controls have been **run with RNG isolation**
+> (`runs/recode-50-controls-rng-merged`, 10 seeds): structural growth still beats
+> no-growth under the supervised decoder (`structural_on` 0.813 vs `trained`
+> 0.400, Holm *p* = 0.018), but the gain is statistically unchanged when all label
+> guidance is removed (`structural_unguided` 0.798 vs 0.813, Holm *p* = 1.0),
+> random category assignment lowers the mean to 0.652 without reaching
+> significance (Δ = +0.162, Holm *p* = 0.49), and a **no-growth decoder given 300
+> random Kenyon-cell projections reaches 0.990**, above every growth condition
+> (Holm *p* = 0.018). So the growth effect is a decoder-capacity effect, not a
+> learned, label-guided prototype. Dopamine has no detectable effect on decoded
+> accuracy (`dopamine_off` 0.855 vs `structural_on` 0.813, Holm *p* = 1.0), but
+> that is a null about a refitted decoder, not evidence that plasticity is
+> absent. The online MBON-argmax readout stays at chance throughout, so none of
+> this is online learning.
 >
-> **All archived numbers predate the per-condition RNG-isolation fix**; under the
-> fix, `trained` and `structural_off` (identical configs) are bit-identical.
-> Interpret internally paired contrasts only; absolute values are provisional.
+> **The recode and control numbers are RNG-isolated and final.** `trained` and
+> `structural_off` (identical configs) now differ by exactly 0.000. The
+> physiological baseline re-run is paused and resumable; the archived baseline
+> `runs/odor-v1-merged` remains the physiological reference.
 
 **Neither task produced significant learning in the real evaluation pipeline.**
 The visual task is a documented negative result. The odor task removes every
@@ -283,9 +286,12 @@ readout to train accuracy 1.000 on every seed, yet held-out is 0.268 (default) a
 At gain 1 the bottleneck is the absent Kenyon-cell code, not readout
 initialisation. **This does not generalise to the recoded regime:** after the
 recode the Kenyon-cell probe is ≈ 1.000 and the four-dimensional readout is the
-limiting factor (300 extra features reach 0.983), while the online readout stays
-at chance. The readout is therefore not exonerated as a second bottleneck — only
-as the *first* cause at gain 1.
+limiting factor (300 extra features reach 0.990), while the unsupervised online
+readout stays at chance. Supervised pretraining does lift the online argmax to
+0.420 / 0.325, showing the readout can express the code when its weights start in
+the right place; the failure is in what the plastic rule learns, not in the
+readout's capacity to represent. The readout is therefore not exonerated as a
+second bottleneck — only as the *first* cause at gain 1.
 
 **Not task difficulty:** on the separable task the class structure is trivial
 (probe 1.000) and still nothing learns, so overlap is not the cause.
@@ -425,62 +431,80 @@ A regression test (`test_decoder_is_fit_on_presented_labels_not_dataset_labels`)
 reproduces the leak and guards it, and the smoke pipeline now puts the shuffled
 control at exactly chance (0.250, no warning).
 
-**Residual floor and the leakage test (corrected in revision).** Under the fixed
-harness `recode-v2` puts the shuffled control at **0.330**, down from 0.615 but
-still above raw chance. The earlier draft excused this because it is
-indistinguishable from the untrained network (**0.338**) and changed the leakage
-rule to compare against the higher of chance and the untrained floor. That is a
-goalpost move after the control failed, and it has been removed: the control is
-now tested against chance by a sign-flip permutation test. Under that test the
-gain-20 shuffled control is **above chance (0.330, *p* = 0.020)** while the
-gain-50 control is at chance (0.245, *p* = 0.56). The no-growth isolation controls
-are at or below chance (**0.230** at gain 20, *p* = 0.76; **0.233** at gain 50,
-*p* = 0.73; `runs/recode-v2-extra-merged`, `runs/recode-50-extra-merged`), so the
-pattern is consistent with growth adding generically decodable features rather
-than with label leakage. It remains a residual anomaly, not an exculpation.
+**Leakage test (final RNG-isolated runs).** The control is tested against chance
+by a sign-flip permutation test, not against a moved untrained floor. Under the
+RNG-isolated re-runs the shuffled control is at chance at both gains: **0.285**
+at gain 20 (*p* = 0.122; `runs/recode-v2-rng-merged`) and **0.253** at gain 50
+(*p* = 0.463; `runs/recode-50-v2-rng-merged`). The no-growth isolation controls
+are **0.230** at gain 20 (*p* = 0.75; `runs/recode-v2-extra-rng-merged`) and
+**0.233** at gain 50 (*p* = 0.72; `runs/recode-50-extra-rng-merged`). The earlier
+gain-20 anomaly (0.330, *p* = 0.020) does **not** reproduce under RNG isolation;
+it was run-order noise, not label leakage.
 
-**Mechanism isolation.** `recode-v1` also showed that decoded accuracy tracks
-*structural growth*, not dopamine: `dopamine_off` (growth on) 0.597 and
-`structural_on` 0.618 both far exceed `trained` (growth off) 0.363, while the
-Kenyon-cell probe is high regardless. A new condition `dopamine_off_no_growth`
-completes the dopamine × growth 2×2 so each mechanism can be read off against its
-own control. This is a statement about the supervised decoder; the online readout
-stays at chance.
+**Mechanism isolation.** Decoded accuracy tracks *structural growth*, not
+dopamine: in the RNG-isolated runs `dopamine_off` (growth on) 0.585 / 0.855 and
+`structural_on` 0.573 / 0.813 both far exceed `trained` (growth off) 0.383 /
+0.400, while the Kenyon-cell probe is high regardless. The
+`dopamine_off_no_growth` condition completes the dopamine × growth 2×2 so each
+mechanism can be read off against its own control. This is a statement about the
+supervised decoder; the online readout stays at chance.
 
-**Results.** Both fixed-harness runs are complete — `recode-v2-merged` (gain 20,
-`configs/odor-recode.yaml`) and `recode-50-v2-merged` (gain 50,
+**Results.** Both RNG-isolated runs are complete — `recode-v2-rng-merged` (gain
+20, `configs/odor-recode.yaml`) and `recode-50-v2-rng-merged` (gain 50,
 `configs/odor-recode-50.yaml`), 10 seeds each. Both pass the positive-control gate
-(input probe 1.000; Kenyon-cell probe CV **0.950** at gain 20, **1.000** at gain
-50). Held-out decoder accuracy (mean, chance 0.25):
+(input probe 1.000; Kenyon-cell probe held-out **0.952** at gain 20, **1.000** at
+gain 50). Held-out decoder accuracy (mean, chance 0.25):
 
-| condition | gain 20 | gain 50 |
-| --- | --- | --- |
-| untrained | 0.338 | 0.330 |
-| trained | 0.363 | 0.418 |
-| shuffled_labels | 0.330 | 0.245 |
-| shuffled_labels_no_growth | 0.230 | 0.233 |
-| dopamine_off | 0.597 | 0.785 |
-| dopamine_off_no_growth | 0.357 | 0.387 |
-| trained_pretrained | 0.512 | 0.340 |
-| structural_on | **0.608** | **0.833** |
-| structural_off | 0.370 | 0.435 |
+| condition | gain 20 | gain 50 | online argmax 20 | online argmax 50 |
+| --- | --- | --- | --- | --- |
+| untrained | 0.338 | 0.330 | 0.248 | 0.250 |
+| trained | 0.383 | 0.400 | 0.232 | 0.245 |
+| shuffled_labels | 0.285 | 0.253 | 0.250 | 0.250 |
+| shuffled_labels_no_growth | 0.230 | 0.233 | 0.218 | 0.232 |
+| dopamine_off | 0.585 | 0.855 | 0.253 | 0.250 |
+| dopamine_off_no_growth | 0.365 | 0.388 | 0.250 | 0.250 |
+| trained_pretrained | 0.533 | 0.318 | 0.420 | 0.325 |
+| structural_on | **0.573** | **0.813** | 0.250 | 0.250 |
+| structural_off | 0.383 | 0.400 | 0.232 | 0.245 |
 
-The large numbers are real under the supervised decoder, but they are **not
-evidence of learning**. After Holm correction the trained condition is not above
-the untrained floor (gain 20 +0.025, *p* = 1.0; gain 50 +0.088, *p* = 0.117). The
-supervised decoder nonetheless scales with structural recruitment: with growth off
-(`trained`, `structural_off`, `dopamine_off_no_growth`) it collapses toward the
-untrained floor, while `structural_on` sits far above `structural_off` (+0.238 /
-+0.398, Holm *p* = 0.016). The growth-matched controls demote this to decoder
-capacity (Section [Interpretation](#interpretation)). The gain-20 shuffled control
-is above chance under the permutation test and is reported as an anomaly, not
-explained away. The `recode-v1` shuffled row is superseded.
+The large growth numbers are real under the supervised decoder, but they are
+**not evidence of learning**. After Holm correction the trained condition is not
+above the untrained floor (gain 20 +0.045, *p* = 1.0; gain 50 +0.070, *p* = 0.39).
+The supervised decoder nonetheless scales with structural recruitment: with growth
+off (`trained`, `structural_off`, `dopamine_off_no_growth`) it collapses toward
+the untrained floor, while `structural_on` sits far above `structural_off` (+0.190
+/ +0.413, Holm *p* = 0.035 / 0.016). The growth-matched controls demote this to
+decoder capacity (Section [Interpretation](#interpretation)). The shuffled
+controls are at chance in these runs, and the earlier gain-20 anomaly does not
+reproduce.
 
-**Archival caveat.** All numbers above predate the per-condition RNG-isolation
-fix. Under the fix, `trained` and `structural_off` (identical configs) are
-bit-identical; the archived differences between them are run-order noise. Only
-internally paired contrasts are interpreted, and absolute accuracies are
-provisional pending the re-run.
+**Archival scope.** The recode and control numbers above are RNG-isolated and
+final; `trained` and `structural_off` (identical configs) now differ by exactly
+0.000. The physiological baseline re-run was paused to free compute; the archived
+baseline `runs/odor-v1-merged` remains the physiological reference and predates
+the fix, so only its internally paired contrasts are interpreted.
+
+### Fast reward-prediction-error diagnostic (triage)
+
+To chase the second bottleneck directly, we added an `online_rpe` condition that
+keeps the per-output credit rule but scales each class's valence by the absolute
+reward prediction error. A formal sweep would cost days, so we first ran a cheap
+triage on the gain-50 recode: `dt` 0.5 ms, 240 trials, three seeds, argmax readout
+only, probes and growth off (`configs/fast-online-rpe.yaml`,
+`runs/fast-online-rpe-merged`). It is underpowered and off the formal grid; it can
+detect a large rescue, not a small one.
+
+| condition | online argmax | 95 % CI | train acc |
+|---|---|---|---|
+| untrained | 0.250 | [0.250, 0.250] | — |
+| trained | 0.233 | [0.150, 0.300] | 0.237 |
+| online_rpe | 0.250 | [0.250, 0.250] | 0.251 |
+
+The RPE-gated rule was at chance on all three seeds and collapsed to a
+near-constant prediction, like the untrained network. Training accuracy was 0.251,
+still at the four-way floor. Scalar-surprise gating alone does not open the online
+bottleneck, so a formal RPE sweep is low priority. This is a triage result, not a
+formal negative, and its absolute numbers are not used in the headline claims.
 
 ---
 
@@ -499,34 +523,38 @@ regime, not the input encoding or the missing optic-lobe route. That much is
 reported as a negative result without reframing.
 
 The recode follow-up shows the diagnosis is actionable but **not sufficient**.
-Raising the transform's gain restores the Kenyon-cell code (CV 0.950–1.000) and
-raises the supervised decoder (growth-on **0.833** at gain 50), yet the online
+Raising the transform's gain restores the Kenyon-cell code (CV 0.956–1.000) and
+raises the supervised decoder (growth-on **0.813** at gain 50), yet the online
 MBON-argmax readout stays at chance in every condition measured. The readout and
 its credit rule are therefore a **second, unresolved bottleneck**; the earlier
 claim that the recode "makes the network learn" is withdrawn. The large growth
 numbers are further demoted by the matched controls: they are a decoder-capacity
-effect, not a learned prototype.
+effect, not a learned prototype. Supervised pretraining lifts the online argmax
+to 0.420 / 0.325, so the readout can express the code; the unsupervised credit
+rule does not get there.
 
-All archived numbers predate the per-condition RNG-isolation fix (Section
-[Recode follow-up](#recode-follow-up-decoder-fit-leakage-and-the-harness-fix)).
-Under the fix, identical configurations are bit-identical. Interpret only
-internally paired contrasts; absolute values are provisional.
+The recode and control numbers are RNG-isolated and final; identical
+configurations are bit-identical (`trained` − `structural_off` = 0.000). The
+physiological baseline re-run is paused, so the archived baseline remains the
+reference for gain 1 and only its internally paired contrasts are interpreted.
 
 ## What would need to change to revisit it
 
-- **Re-run the sweep with RNG isolation and the new diagnostics.** The
-  per-condition seeding fix makes identical configurations comparable, and the
-  probe diagnostics (spontaneous vs evoked Kenyon-cell rates, activity
-  sparseness) separate a transform failure from a signal-to-noise failure at gain
-  1. This is the first requirement before publishing absolute accuracies.
+- **Finish the RNG-isolated baseline run and add the separating diagnostics.**
+  The recode/control sweeps are done; the physiological baseline re-run was paused
+  mid-`trained`. The probe diagnostics (spontaneous vs evoked Kenyon-cell rates,
+  activity sparseness) separate a transform failure from a signal-to-noise failure
+  at gain 1.
 - **Treat the readout/credit rule as a co-equal bottleneck.** After the recode the
   Kenyon-cell code is decodable (probe ≈ 1.000) while the online argmax is at
-  chance, so an online-learning benchmark is needed. A reward-prediction-error
-  baseline (`learning.rpe_per_class` on `feat/online-readout-rpe`) removes the
-  ≈75 % wrong-at-chance surplus that swamps the per-class credit rule; it must be
-  run on the main sweep before any claim that the circuit learns.
+  chance, so an online-learning benchmark is needed. We tried a
+  reward-prediction-error variant (`learning.rpe_per_class`, condition
+  `online_rpe`) and it also stayed at chance on a fast triage
+  (`configs/fast-online-rpe.yaml`): 0.250 on three seeds. A different credit
+  rule, or a longer/denser online benchmark, is needed; a formal RPE sweep is low
+  priority until there is a positive triage signal.
 - **A 4-dimensional MBON readout is the binding decoder constraint.** The
-  no-growth 300-random-feature control reaches 0.983; any hypothesis about
+  no-growth 300-random-feature control reaches 0.990; any hypothesis about
   growth, dopamine, or the transform must be evaluated against that capacity
   reference.
 - **Simulate the real `DAN → mushroom body` edges** (reorder stages so
@@ -534,9 +562,9 @@ internally paired contrasts; absolute values are provisional.
   surrogate, so the teacher flows through real synapses.
 - **Resolve the `trained_pretrained` anomaly.** Supervised pretraining is negative
   at gain 1 (it fits the Kenyon-cell features to 1.000 yet generalises at chance),
-  but the condition is 0.512 at gain 20 and 0.340 at gain 50 and is
-  under-specified. The previously reported 0.351 online argmax is not in any
-  archived result and is withdrawn.
+  but the condition is 0.533 at gain 20 and 0.318 at gain 50 and is
+  under-specified. Its online argmax is 0.420 / 0.325, consistent with supervised
+  initialisation rather than dopamine learning.
 
 ## Reproducing
 
@@ -564,6 +592,7 @@ git commit). The visual 2-seed run is `runs/run-20261008T204756Z/`; the odor
 reduced diagnostic is `runs/run-20261009T095645Z/`; the formal odor run is
 `runs/odor-v1-merged/`; the positive-control runs are `runs/pctrl-v1-merged/`
 and `runs/pctrl-sep-merged/`. The recode follow-up runs
-are `runs/recode-v2-merged` (gain 20) and `runs/recode-50-v2-merged` (gain 50),
+are `runs/recode-v2-rng-merged` (gain 20) and `runs/recode-50-v2-rng-merged`
+(gain 50), the growth-matched controls in `runs/recode-50-controls-rng-merged`,
 with the `shuffled_labels_no_growth` isolation controls in
-`runs/recode-v2-extra-merged` and `runs/recode-50-extra-merged`.
+`runs/recode-v2-extra-rng-merged` and `runs/recode-50-extra-rng-merged`.
