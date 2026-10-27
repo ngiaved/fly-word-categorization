@@ -228,7 +228,14 @@ def build_network(
     """Build the Brian2 network for a subcircuit at a given weight scale."""
     import brian2 as b2
 
-    b2.prefs.codegen.target = config.get("simulation.codegen_target")
+    from . import compat
+
+    # Probe the C++ toolchain once per process so a broken CLT install
+    # (missing libc++ umbrella headers) cannot abort every run with a
+    # CompileError; see `compat` for the details.
+    b2.prefs.codegen.target = compat.resolve_codegen_target(
+        config.get("simulation.codegen_target")
+    )
     dt = float(config.get("simulation.dt"))
     b2.defaultclock.dt = dt * b2.ms
 
