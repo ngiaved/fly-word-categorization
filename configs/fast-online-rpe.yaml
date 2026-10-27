@@ -1,0 +1,56 @@
+# Fast diagnostic for the online readout bottleneck.
+#
+# NOT a source of reported accuracy. This config trades statistical power and
+# temporal resolution for a short wall-clock run, so the `online_rpe` condition
+# can be triaged before spending days on a formal sweep.
+#
+# It layers on the gain-50 recode (where the Kenyon-cell code is known to be
+# fully decodable) and compares:
+#   untrained  - floor
+#   trained    - existing per-class credit
+#   online_rpe - per-class credit gated by reward prediction error
+#
+# Differences from the formal recode config:
+#   * dt 0.5 ms instead of 0.1 ms (5x fewer integration steps)
+#   * 240 training trials instead of 600 (~4 epochs)
+#   * 3 seeds instead of 10
+#   * argmax readout only, so no supervised decoder pass is needed
+#   * probes disabled (the gain-50 probe is already 1.000 in the formal run)
+#
+# If the online readout moves above chance here, re-run the same conditions
+# with the formal config; do not publish these numbers.
+
+simulation:
+  dt: 0.5
+
+network:
+  pair_gain:
+    mushroom_body>output: 10.0
+    olfactory>mushroom_body: 50.0
+
+calibration:
+  # Same widened ceiling as the formal recode.
+  max_mean_rate_hz: 100.0
+
+encoding:
+  # Shorter trial (300 ms total instead of 500 ms).
+  stimulus_ms: 200.0
+  rest_ms: 100.0
+
+evaluation:
+  readout: argmax
+  n_seeds: 3
+  base_seed: 1000
+  n_train_trials: 240
+  curve_window_trials: 20
+  eval_repeats: 1
+  decoder_window: 60
+  probes:
+    enabled: false
+  conditions:
+    - untrained
+    - trained
+    - online_rpe
+
+structural:
+  enabled: false

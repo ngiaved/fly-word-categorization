@@ -219,6 +219,22 @@ python -m flyread --config configs/fast-online-rpe.yaml \
     --run-id fast-online-rpe sweep --workers 3
 ```
 
+### Platform note: running on the local macOS machine
+
+The machine's Command Line Tools install ships `usr/include/c++/v1` without
+the umbrella C++ headers (`ios`, `vector`, ...), so Brian2's Cython builds
+used to die with `fatal error: 'ios' file not found` (a broken toolchain,
+not a Brian2 or flyread bug; complete header copies live inside the SDKs).
+Two layers make runs work here regardless of shell environment:
+
+* `flyread.compat` (applied by `build_network`) points `CPLUS_INCLUDE_PATH`
+  at the intact SDK copy of the libc++ headers, then probes a minimal
+  `<ios>` C++ program once per process. `simulation.codegen_target: auto`
+  resolves to numpy instead of dying mid-run whenever the probe fails.
+* The default config pins `simulation.codegen_target: numpy`, which needs no
+  compiler at all, and `scripts/run_final_sweeps.sh` exports the same include
+  path for shell-launched runs.
+
 Archived runs: `runs/odor-v1-merged` (physiological null),
 `runs/pctrl-v1-merged` / `runs/pctrl-sep-merged` (probes, separable control),
 `runs/recode-v2-rng-merged` (gain 20), `runs/recode-50-v2-rng-merged` (gain 50),
